@@ -63,3 +63,60 @@ canvas {
   opacity: 0.4;
   cursor: default;
 }
+
+/* right-side mode menu */
+.modemenu {
+  position: fixed;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-height: 92vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 8px;
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(12, 12, 16, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+  scrollbar-width: thin;
+  opacity: 0.35;
+  transition: opacity 0.2s ease;
+}
+.modemenu:hover {
+  opacity: 1;
+}
+.modegroup {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.modegroup-label {
+  color: rgba(255, 255, 255, 0.4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  padding: 0 4px 2px;
+}
+.modebtn {
+  appearance: none;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.modebtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.95);
+}
+.modebtn.active {
+  background: rgba(120, 160, 255, 0.22);
+  border-color: rgba(140, 175, 255, 0.5);
+  color: #fff;
+}

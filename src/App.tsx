@@ -12,11 +12,14 @@ export default function App() {
   const [palette, setPalette] = useState("");
   const [evolve, setEvolve] = useState(0);
   const [breathe, setBreathe] = useState({ rate: 0, peak: 0 });
+  const [mode, setMode] = useState("");
 
   const [status, setStatus] = useState("idle");
   const [bpm, setBpm] = useState(0);
   const [track, setTrack] = useState("");
   const [playing, setPlaying] = useState(false);
+
+  const modeNames = Visualizer.modeNames();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -27,6 +30,7 @@ export default function App() {
     viz.onPaletteChange = setPalette;
     viz.onFieldSpeedChange = setEvolve;
     viz.onBreatheChange = (rate, peak) => setBreathe({ rate, peak });
+    viz.onModeChange = setMode;
     viz.start();
     return () => {
       viz.dispose();
@@ -72,6 +76,26 @@ export default function App() {
     if (file) loadAndPlay(URL.createObjectURL(file), file.name);
   }
 
+  function pickMode(name: string) {
+    vizRef.current?.selectMode(name);
+  }
+
+  // group modes by their family for a readable menu
+  const groups: { label: string; names: string[] }[] = [];
+  for (const name of modeNames) {
+    let label = "other";
+    if (name.startsWith("auto") || name === "surface") label = "auto";
+    else if (name.startsWith("sym") || name.startsWith("morph")) label = "symmetric";
+    else if (name.startsWith("orbit")) label = "orbital";
+    else if (name.startsWith("bounce") || name.startsWith("swarm")) label = "bounce";
+    else if (name.startsWith("bubble") || name.startsWith("swirl")) label = "multipoint";
+    else if (name.startsWith("radial") || name.startsWith("grid") || name.startsWith("polar") || name === "off")
+      label = "basic";
+    const g = groups.find((x) => x.label === label);
+    if (g) g.names.push(name);
+    else groups.push({ label, names: [name] });
+  }
+
   return (
     <>
       <canvas ref={canvasRef} />
@@ -93,6 +117,23 @@ export default function App() {
           Load file…
           <input type="file" accept="audio/*" onChange={onFile} hidden />
         </label>
+      </div>
+
+      <div className="modemenu">
+        {groups.map((g) => (
+          <div className="modegroup" key={g.label}>
+            <div className="modegroup-label">{g.label}</div>
+            {g.names.map((name) => (
+              <button
+                key={name}
+                className={"modebtn" + (name === mode ? " active" : "")}
+                onClick={() => pickMode(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        ))}
       </div>
 
       <div className="hud">

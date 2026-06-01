@@ -392,6 +392,7 @@ const displayFrag = /* glsl */ `
   uniform float uContrast;    // music-driven brightness contrast (1 = neutral)
   uniform float uExposure;    // auto-exposure: pulled down on loud parts (1 = neutral)
   uniform float uMix;         // 0 = show set A, 1 = show set B (crossfade dissolve)
+  uniform float uSeamSoft;    // 0 = hard mirror seams, 1 = strongly feathered seams
   // Two full parameter sets so we can crossfade between any two presets.
   // Layout: 0 kind, 1 segments, 2 rings, 3 points, 4 bubbleRate, 5 driftAmt,
   // 6 driftSpeed, 7 rotSpeed, 8 segPerPoint, 9 blendSharp, 10 orbitRadius,
@@ -632,6 +633,15 @@ const displayFrag = /* glsl */ `
   // point COUNT can change invisibly while consolidated. globalPhase rotates the
   // whole ring (circling); each focal region has its own local kaleido fold
   // (localSeg) that spins (spinRate) + twists with radius (swirl).
+  // Rounded mirror fold. Replaces a hard abs() (which makes a sharp derivative
+  // kink → a high-contrast seam) with sqrt(x²+k²)−k: the crease at the fold line
+  // is rounded, and because the folded value tops out slightly below the half-
+  // sector, content eases off APPROACHING the seam instead of meeting its mirror
+  // head-on. k=0 → identical to abs() (hard seam). k scales with the sector.
+  float softFold(float x, float k) {
+    return sqrt(x * x + k * k) - k;
+  }
+
   vec2 symMorph(vec2 uv, float aspect, float numPoints, float focusR,
                 float globalPhase, float spinPhase, float swirl, float localSeg) {
     vec2 p = uv - 0.5;
@@ -640,7 +650,8 @@ const displayFrag = /* glsl */ `
     float a = atan(p.y, p.x) - globalPhase;       // rotate whole figure
     float sector = TAU / max(numPoints, 1.0);
     a = mod(a, sector);
-    a = abs(a - sector * 0.5);                     // mirror within sector → midline at a=0
+    float kS = uSeamSoft * 0.16 * sector;          // seam feather scaled to sector
+    a = softFold(a - sector * 0.5, kS);            // rounded mirror within sector
     p = r * vec2(cos(a), sin(a));
     vec2 c = vec2(focusR, 0.0);                     // focal point on the sector midline
     vec2 q = p - c;
@@ -650,7 +661,8 @@ const displayFrag = /* glsl */ `
     float aa = atan(q.y, q.x) + spinPhase + swirl * rr; // regional spin + swirl
     float lseg = TAU / max(localSeg, 1.0);
     aa = mod(aa, lseg);
-    aa = abs(aa - lseg * 0.5);
+    float kL = uSeamSoft * 0.16 * lseg;            // soften the regional fold seam too
+    aa = softFold(aa - lseg * 0.5, kL);
     q = rr * vec2(cos(aa), sin(aa));
     p = c + q;
     p.x /= aspect;
@@ -725,6 +737,18 @@ export class Visualizer {
   onPaletteChange: (name: string) => void = () => {};
   onFieldSpeedChange: (speed: number) => void = () => {};
   onBreatheChange: (rate: number, peak: number) => void = () => {};
+  onModeChange: (name: string) => void = () => {}; // active base mode (for the menu)
+
+  /** The full list of selectable mode names, in menu order. */
+  static modeNames(): string[] {
+    return KALEIDO_MODES.map((m) => m.name);
+  }
+
+  /** Select a mode by its name (used by the click menu). */
+  selectMode(name: string) {
+    const i = KALEIDO_MODES.findIndex((m) => m.name === name);
+    if (i >= 0) this.setKaleido(i);
+  }
 
   private canvas: HTMLCanvasElement;
   private renderer: THREE.WebGLRenderer;
@@ -987,6 +1011,7 @@ export class Visualizer {
         uContrast: { value: 1.0 },
         uExposure: { value: 1.0 },
         uMix: { value: 0 },
+        uSeamSoft: { value: 0.6 },
         uA: { value: this.uAVals },
         uB: { value: this.uBVals },
       },
@@ -1042,6 +1067,7 @@ export class Visualizer {
   private setKaleido(index: number) {
     this.kaleidoIndex = ((index % KALEIDO_MODES.length) + KALEIDO_MODES.length) % KALEIDO_MODES.length;
     const m = KALEIDO_MODES[this.kaleidoIndex];
+    this.onModeChange(m.name); // tell the menu which base mode is active
     if (m.auto) {
       this.startAuto(m.auto, m.name);
       return;
@@ -1494,8 +1520,9 @@ export class Visualizer {
   start() {
     if (this.running) return;
     this.running = true;
-    // default to the headline surface (water) mode
-    this.setKaleido(0);
+    // default to auto·symmetry (the strongest base). surface is kept at index 0
+    // for A/B comparison via the menu, but symmetry leads.
+    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · symmetry"));
     // push current state so the HUD reflects it immediately
     this.emitKaleidoLabel();
     this.onPaletteChange(PALETTES[this.paletteIndex].name);
