@@ -77,8 +77,10 @@ const KALEIDO_MODES: KaleidoMode[] = [
   { name: "sym split 4×", kind: 8, ...K0, points: 4, segPerPoint: 5, rotSpeed: 0.08, orbitRadius: 0.13, driftAmt: 0.18, orbitSpeed: 0.11 },
   // unified symMorph space (kind 9) — the morph-friendly auto·symmetry family.
   // slot map: splitX=orbitRadius, splitY=centerPull, spin=rotSpeed, swirl=driftAmt, moveAmp=bubbleRate, moveSpeed=orbitSpeed
-  { name: "morph · part 2", kind: 9, ...K0, segments: 8, orbitRadius: 0.22, centerPull: 0.0, rotSpeed: 0.09, driftAmt: 2.0, bubbleRate: 0.06, orbitSpeed: 0.20 },
-  { name: "morph · grid 4", kind: 9, ...K0, segments: 8, orbitRadius: 0.22, centerPull: 0.22, rotSpeed: 0.10, driftAmt: 2.6, bubbleRate: 0.09, orbitSpeed: 0.26 },
+  // kind-9 slots: points=numPoints, segments=localSeg, orbitRadius=focusR, rotSpeed=spin, driftAmt=swirl
+  { name: "morph · two", kind: 9, ...K0, points: 2, segments: 6, orbitRadius: 0.24, rotSpeed: 0.09, driftAmt: 2.0 },
+  { name: "morph · triangle", kind: 9, ...K0, points: 3, segments: 6, orbitRadius: 0.26, rotSpeed: 0.10, driftAmt: 2.4 },
+  { name: "morph · eight", kind: 9, ...K0, points: 8, segments: 4, orbitRadius: 0.20, rotSpeed: 0.12, driftAmt: 2.8 },
 ];
 
 // quick constructor for ad-hoc presets (low mirror counts not in the K cycle)
@@ -123,34 +125,28 @@ const AUTO_LADDER: KaleidoMode[] = [
   findMode("swarm 6 · mixed"),
 ];
 
-// AUTO "symmetry" is no longer a parking energy-ladder. It's a continuous
-// choreographed JOURNEY through the unified symMorph space (kind 9), driven
-// frame-by-frame in updateSymJourney(). The focal point walks through these
-// keyframes (consolidate → 2 → 4 → circle → consolidate → bloom → loop) while
-// globalPhase advances continuously so the constellation orbits the center.
-//   focusR : 0 = one point at center; >0 = splits outward
-//   focusAng (turns, ×TAU): 0 = 2 points horizontal; 0.125 = 4 (diagonal grid)
-//   spin/swirl : per-point fold spin + radial twist (orbiting arms)
-//   circle : how fast the whole figure rotates as a rigid body (turns/sec)
-//   hold : seconds to dwell here before easing to the next keyframe
-type SymKey = {
-  name: string;
+// AUTO "symmetry" is a GENERATIVE journey (not fixed keyframes). It breathes
+// between two pose types — CENTER (all points consolidated at the middle, a
+// calm pause) and BLOOM (points spread into an N-fold ring that spins/circles).
+// Each time it returns to center it rolls a NEW random bloom: a different point
+// count N (incl. 3 → triangle), radius, spin direction, swirl, local fold, and
+// dwell — so it explores 2/3/4/6/8/16 and never repeats. Because focusR=0 at
+// center collapses all N to one spot, N can change invisibly while consolidated.
+//
+// A "pose" is the target the journey eases toward; SymPose holds the kind-9
+// params. numPoints = focal points in the ring; localSeg = each region's own
+// kaleido fold (regional symmetry); circle = rigid-body rotation (turns/sec).
+type SymPose = {
+  numPoints: number;
   focusR: number;
-  focusAng: number; // in turns (multiply by TAU in the driver)
   spin: number;
   swirl: number;
   circle: number;
-  hold: number;
+  localSeg: number;
 };
-const SYM_JOURNEY: SymKey[] = [
-  { name: "one",            focusR: 0.00, focusAng: 0.0,   spin: 0.05, swirl: 0.6, circle: 0.00, hold: 7 },
-  { name: "split two",      focusR: 0.22, focusAng: 0.0,   spin: 0.07, swirl: 1.4, circle: 0.01, hold: 7 },
-  { name: "four grid",      focusR: 0.24, focusAng: 0.125, spin: 0.08, swirl: 1.8, circle: 0.02, hold: 7 },
-  { name: "four circling",  focusR: 0.26, focusAng: 0.125, spin: 0.10, swirl: 2.6, circle: 0.09, hold: 9 },
-  { name: "two circling",   focusR: 0.24, focusAng: 0.0,   spin: 0.09, swirl: 2.0, circle: 0.07, hold: 7 },
-  { name: "consolidate",    focusR: 0.04, focusAng: 0.0,   spin: 0.06, swirl: 1.0, circle: 0.02, hold: 6 },
-  { name: "bloom",          focusR: 0.30, focusAng: 0.0625,spin: 0.14, swirl: 3.4, circle: 0.05, hold: 8 },
-];
+// Allowed point counts for blooms — even spacing guaranteed for any N; 3 gives a
+// triangle. Weighted toward the prettier low counts but reaching up to 16.
+const SYM_POINT_COUNTS = [2, 3, 4, 4, 6, 8, 16];
 
 // Cosine-gradient palettes (Inigo Quilez form): color(t) = a + b*cos(2π(c*t + d)).
 type Palette = {
@@ -550,21 +546,32 @@ const displayFrag = /* glsl */ `
   // Because we rotate before folding, the constellation can orbit the center as
   // a rigid body and still stay perfectly symmetric. spinRate spins each point's
   // local kaleido fold; swirl adds a radius-dependent twist (orbiting arms).
-  vec2 symMorph(vec2 uv, float aspect, float seg, float focusR, float focusAng,
-                float globalPhase, float spinRate, float swirl) {
+  // N-fold dihedral fold: numPoints focal points arranged in an evenly-spaced
+  // ring (works for any N — 2, 3 triangle, 4, 6, 8, 16…). We fold the plane into
+  // one mirrored sector of angle TAU/N, place ONE focal point on the sector
+  // midline at radius focusR, and the N-fold fold replicates it into a perfectly
+  // symmetric ring. focusR=0 → all N coincide at the center (one point), so the
+  // point COUNT can change invisibly while consolidated. globalPhase rotates the
+  // whole ring (circling); each focal region has its own local kaleido fold
+  // (localSeg) that spins (spinRate) + twists with radius (swirl).
+  vec2 symMorph(vec2 uv, float aspect, float numPoints, float focusR,
+                float globalPhase, float spinRate, float swirl, float localSeg) {
     vec2 p = uv - 0.5;
     p.x *= aspect;
-    float cs = cos(globalPhase), sn = sin(globalPhase);
-    p = mat2(cs, -sn, sn, cs) * p;  // rigid rotation → the whole figure circles
-    p = abs(p);                     // 4-fold dihedral mirror (about rotated axes)
-    vec2 c = focusR * vec2(cos(focusAng), sin(focusAng)); // focal point; R=0→center
+    float r = length(p);
+    float a = atan(p.y, p.x) - globalPhase;       // rotate whole figure
+    float sector = TAU / max(numPoints, 1.0);
+    a = mod(a, sector);
+    a = abs(a - sector * 0.5);                     // mirror within sector → midline at a=0
+    p = r * vec2(cos(a), sin(a));
+    vec2 c = vec2(focusR, 0.0);                     // focal point on the sector midline
     vec2 q = p - c;
-    float r = length(q);
-    float a = atan(q.y, q.x) + uTime * spinRate + swirl * r;
-    float seg_a = TAU / max(seg, 1.0);
-    a = mod(a, seg_a);
-    a = abs(a - seg_a * 0.5);
-    q = vec2(cos(a), sin(a)) * r;
+    float rr = length(q);
+    float aa = atan(q.y, q.x) + uTime * spinRate + swirl * rr; // regional spin + swirl
+    float lseg = TAU / max(localSeg, 1.0);
+    aa = mod(aa, lseg);
+    aa = abs(aa - lseg * 0.5);
+    q = rr * vec2(cos(aa), sin(aa));
     p = c + q;
     p.x /= aspect;
     return p + 0.5;
@@ -588,9 +595,9 @@ const displayFrag = /* glsl */ `
     else if (k == 7) return symmetric(uv, aspect, seg, rotSpeed, driftAmt, orbitRadius, driftSpeed);
     // symSplit: splitCount=pts, segPerPoint, spin=rotSpeed, spreadBase=orbitRadius, spreadAmp=driftAmt, spreadSpeed=orbitSpeed
     else if (k == 8) return symSplit(uv, aspect, pts, segPerPoint, rotSpeed, orbitRadius, driftAmt, orbitSpeed);
-    // symMorph (unified morph space): seg, focusR=orbitRadius, focusAng=centerPull,
-    //   globalPhase=bubbleRate, spinRate=rotSpeed, swirl=driftAmt
-    else if (k == 9) return symMorph(uv, aspect, seg, orbitRadius, centerPull, bubbleRate, rotSpeed, driftAmt);
+    // symMorph (unified morph space): numPoints=pts, focusR=orbitRadius,
+    //   globalPhase=bubbleRate, spinRate=rotSpeed, swirl=driftAmt, localSeg=seg
+    else if (k == 9) return symMorph(uv, aspect, pts, orbitRadius, bubbleRate, rotSpeed, driftAmt, seg);
     return uv; // 0 = off
   }
 
@@ -602,15 +609,15 @@ const displayFrag = /* glsl */ `
     bool bothMorph = int(uA[0] + 0.5) == 9 && int(uB[0] + 0.5) == 9;
     if (uMix > 0.001 && bothMorph) {
       // PARAMETER morph: lerp the symMorph params and sample the trail ONCE, so
-      // the same particle field continuously reshapes (focus radius/angle slide,
+      // the same particle field continuously reshapes (focus radius slides,
       // figure rotates) instead of one image cross-dissolving over another.
-      float seg    = mix(uA[1],  uB[1],  m);
+      float npts   = mix(uA[3],  uB[3],  m);
       float focusR = mix(uA[10], uB[10], m);
-      float focusA = mix(uA[12], uB[12], m);
       float gPhase = mix(uA[4],  uB[4],  m);
       float spin   = mix(uA[7],  uB[7],  m);
       float swirl  = mix(uA[5],  uB[5],  m);
-      vec2 uv = symMorph(vUv, aspect, seg, focusR, focusA, gPhase, spin, swirl);
+      float lseg   = mix(uA[1],  uB[1],  m);
+      vec2 uv = symMorph(vUv, aspect, npts, focusR, gPhase, spin, swirl, lseg);
       col = texture2D(tTrail, uv).rgb;
     } else {
       vec2 uvA = mapK(vUv, aspect, uA[0],uA[1],uA[2],uA[3],uA[4],uA[5],uA[6],uA[7],uA[8],uA[9],uA[10],uA[11],uA[12],uA[13],uA[14]);
@@ -688,9 +695,15 @@ export class Visualizer {
   private autoEnergy = 0; // music: slow-smoothed track energy
   private autoTier = 0; // music: current rung in AUTO_LADDER
   private autoCooldown = 0; // music: min dwell before next rung change
-  // symmetry journey driver
-  private symKey = 0; // index into SYM_JOURNEY
-  private symT = 0; // 0..1 progress through current keyframe
+  // symmetry journey driver (generative pose machine)
+  private symFrom: SymPose = { numPoints: 2, focusR: 0, spin: 0, swirl: 0, circle: 0, localSeg: 6 };
+  private symTo: SymPose = { numPoints: 2, focusR: 0, spin: 0, swirl: 0, circle: 0, localSeg: 6 };
+  private symCur: SymPose = { numPoints: 2, focusR: 0, spin: 0, swirl: 0, circle: 0, localSeg: 6 };
+  private symT = 1; // 0..1 progress of the current ease (1 = arrived)
+  private symHold = 0; // seconds left to dwell at the target before retargeting
+  private symMoveDur = 4; // seconds for the current ease
+  private symAtBloom = false; // is the current target a bloom (vs center)?
+  private symPendingN = 2; // point count chosen at center for the next bloom
   private symPhase = 0; // accumulated rigid-body rotation (radians)
 
   // optional music reactivity
@@ -964,14 +977,19 @@ export class Visualizer {
     if (kind === "symmetry") {
       // one continuously-morphing kind-9 field driven by updateSymJourney();
       // no A/B crossfade needed (params animate every frame). Seed set A.
-      this.symT = 0;
-      this.symKey = 0;
       this.symPhase = 0;
       this.modeB = null;
       this.mix = 0;
       this.displayMat.uniforms.uMix.value = 0;
       this.modeA = km("auto · symmetry", { kind: 9, segments: 8 });
       this.fillMode(this.modeA, this.uAVals);
+      // start consolidated at center, then immediately roll a first bloom target
+      this.symFrom = this.centerPose();
+      this.symCur = { ...this.symFrom };
+      this.symTo = this.symFrom;
+      this.symAtBloom = false; // next arrival is a bloom
+      this.symT = 1; // force an immediate retarget on first update
+      this.symHold = 0;
       this.updateSymJourney(0); // write initial params
     } else {
       const first = kind === "cycle" ? AUTO_PROGRAM[0] : AUTO_LADDER[0];
@@ -980,12 +998,37 @@ export class Visualizer {
     this.emitKaleidoLabel();
   }
 
-  /** Continuous symmetry journey: eased walk through SYM_JOURNEY keyframes,
-   *  writing kind-9 params straight into uAVals so the SAME field morphs. The
-   *  whole figure also rotates (symPhase) so the constellation circles. Music
-   *  energy modulates pace + radius so it breathes with the track. */
+  /** A calm consolidated pose: all points pulled to the center. Point count is
+   *  carried through so it can change invisibly while collapsed. */
+  private centerPose(numPoints = 2): SymPose {
+    return { numPoints, focusR: 0.0, spin: 0.04, swirl: 0.5, circle: 0.0, localSeg: 6 };
+  }
+
+  /** Roll a fresh random bloom pose — new N (incl. 3=triangle, up to 16),
+   *  radius, spin direction, swirl, regional fold, and rotation. Never repeats. */
+  private randomBloom(): SymPose {
+    const rnd = Math.random;
+    const N = SYM_POINT_COUNTS[Math.floor(rnd() * SYM_POINT_COUNTS.length)];
+    // higher N looks better a little tighter so the ring doesn't overlap itself
+    const focusR = (N <= 3 ? 0.26 : N <= 6 ? 0.23 : 0.20) + rnd() * 0.06;
+    const dir = rnd() < 0.5 ? -1 : 1; // sometimes rotate the other way
+    return {
+      numPoints: N,
+      focusR,
+      spin: (0.05 + rnd() * 0.12) * (rnd() < 0.5 ? -1 : 1),
+      swirl: 0.8 + rnd() * 2.8,
+      circle: dir * (0.02 + rnd() * 0.09),
+      // regional fold per focal point: sometimes simple mirror, sometimes ornate
+      localSeg: [2, 3, 4, 5, 6, 8][Math.floor(rnd() * 6)],
+    };
+  }
+
+  /** Generative symmetry journey. Eases the current pose toward a target; on
+   *  arrival it dwells (hold), then retargets — alternating CENTER (calm pause)
+   *  and a freshly-rolled random BLOOM. The whole figure also rotates (symPhase)
+   *  so the constellation circles. Music energy modulates pace, spread, dwell. */
   private updateSymJourney(dt: number) {
-    // music energy (or a slow idle drift) → pace + size of the journey
+    // music energy (or a slow idle drift) → pace + spread + dwell
     let e: number;
     if (this.audioEl && this.flow && !this.audioEl.paused && !this.audioEl.ended) {
       const s = this.flow.sample(this.audioEl.currentTime);
@@ -995,35 +1038,60 @@ export class Visualizer {
     }
     this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5));
 
-    const cur = SYM_JOURNEY[this.symKey];
-    const nxt = SYM_JOURNEY[(this.symKey + 1) % SYM_JOURNEY.length];
-    // advance along the current keyframe; louder = a little faster through it
-    const pace = 0.6 + this.autoEnergy * 0.9;
-    this.symT += (dt / cur.hold) * pace;
-    let seg = 0;
-    if (this.symT >= 1) {
-      this.symT -= 1;
-      this.symKey = (this.symKey + 1) % SYM_JOURNEY.length;
-      seg = 1;
+    // advance the eased transition toward the target pose (slower = more graceful)
+    const pace = 0.5 + this.autoEnergy * 0.8;
+    if (this.symT < 1) {
+      this.symT = Math.min(1, this.symT + (dt / this.symMoveDur) * pace);
+    } else {
+      // arrived: dwell, then retarget (alternating CENTER ↔ a fresh random BLOOM)
+      this.symHold -= dt;
+      if (this.symHold <= 0) {
+        this.symFrom = { ...this.symCur };
+        if (this.symAtBloom) {
+          // return to center; carry the NEXT bloom's N so the count change is hidden
+          this.symPendingN = SYM_POINT_COUNTS[Math.floor(Math.random() * SYM_POINT_COUNTS.length)];
+          this.symTo = this.centerPose(this.symPendingN);
+          this.symMoveDur = 3.5 + Math.random() * 2.5;
+          this.symHold = 3 + Math.random() * 6; // pause at center (longer sometimes)
+          this.symAtBloom = false;
+        } else {
+          const bloom = this.randomBloom();
+          bloom.numPoints = this.symPendingN || bloom.numPoints; // N chosen at center
+          this.symTo = bloom;
+          this.symMoveDur = 4 + Math.random() * 3;
+          this.symHold = 4 + Math.random() * 5; // dwell in the bloom
+          this.symAtBloom = true;
+        }
+        this.symT = 0;
+      }
     }
-    const a = seg ? SYM_JOURNEY[this.symKey] : cur;
-    const b = seg ? SYM_JOURNEY[(this.symKey + 1) % SYM_JOURNEY.length] : nxt;
-    const m = this.symT * this.symT * (3 - 2 * this.symT); // smoothstep ease
-    const lerp = (x: number, y: number) => x + (y - x) * m;
-    // energy lifts the focal radius a touch so crescendos spread wider
-    const rBoost = 1 + this.autoEnergy * 0.25;
-    const focusR = lerp(a.focusR, b.focusR) * rBoost;
-    const focusAng = lerp(a.focusAng, b.focusAng) * TAU;
-    const spin = lerp(a.spin, b.spin);
-    const swirl = lerp(a.swirl, b.swirl);
-    const circle = lerp(a.circle, b.circle);
-    // advance the rigid-body rotation so the figure actually circles
-    this.symPhase += dt * circle * TAU;
-    // write kind-9 slots: focusR=orbitRadius[10], focusAng=centerPull[12],
-    // globalPhase=bubbleRate[4], spinRate=rotSpeed[7], swirl=driftAmt[5]
+
+    // smoothstep-eased interpolation from symFrom → symTo
+    const t = this.symT;
+    const m = t * t * (3 - 2 * t);
+    const L = (x: number, y: number) => x + (y - x) * m;
+    const f = this.symFrom, g = this.symTo;
+    const cur = this.symCur;
+    cur.numPoints = g.numPoints; // discrete; safe to switch at center (focusR≈0)
+    cur.focusR = L(f.focusR, g.focusR) * (1 + this.autoEnergy * 0.22);
+    cur.spin = L(f.spin, g.spin);
+    cur.swirl = L(f.swirl, g.swirl);
+    cur.circle = L(f.circle, g.circle);
+    cur.localSeg = L(f.localSeg, g.localSeg);
+
+    // advance rigid-body rotation so the figure circles
+    this.symPhase += dt * cur.circle * TAU;
+
+    // write kind-9 slots: numPoints=pts[3], focusR=orbitRadius[10],
+    // globalPhase=bubbleRate[4], spinRate=rotSpeed[7], swirl=driftAmt[5], localSeg=seg[1]
     const u = this.uAVals;
-    u[0] = 9; u[1] = 8;
-    u[10] = focusR; u[12] = focusAng; u[4] = this.symPhase; u[7] = spin; u[5] = swirl;
+    u[0] = 9;
+    u[3] = cur.numPoints;
+    u[1] = cur.localSeg;
+    u[10] = cur.focusR;
+    u[4] = this.symPhase;
+    u[7] = cur.spin;
+    u[5] = cur.swirl;
   }
 
   /** Advance whichever auto driver is active; may trigger a crossfade. */
