@@ -555,7 +555,7 @@ const displayFrag = /* glsl */ `
   // whole ring (circling); each focal region has its own local kaleido fold
   // (localSeg) that spins (spinRate) + twists with radius (swirl).
   vec2 symMorph(vec2 uv, float aspect, float numPoints, float focusR,
-                float globalPhase, float spinRate, float swirl, float localSeg) {
+                float globalPhase, float spinPhase, float swirl, float localSeg) {
     vec2 p = uv - 0.5;
     p.x *= aspect;
     float r = length(p);
@@ -567,7 +567,9 @@ const displayFrag = /* glsl */ `
     vec2 c = vec2(focusR, 0.0);                     // focal point on the sector midline
     vec2 q = p - c;
     float rr = length(q);
-    float aa = atan(q.y, q.x) + uTime * spinRate + swirl * rr; // regional spin + swirl
+    // spinPhase is an ACCUMULATED angle (not rate*uTime) so changing the spin
+    // speed never causes a jump — the regional pattern's rotation stays C1-smooth.
+    float aa = atan(q.y, q.x) + spinPhase + swirl * rr; // regional spin + swirl
     float lseg = TAU / max(localSeg, 1.0);
     aa = mod(aa, lseg);
     aa = abs(aa - lseg * 0.5);
@@ -704,7 +706,8 @@ export class Visualizer {
   private symMoveDur = 4; // seconds for the current ease
   private symAtBloom = false; // is the current target a bloom (vs center)?
   private symPendingN = 2; // point count chosen at center for the next bloom
-  private symPhase = 0; // accumulated rigid-body rotation (radians)
+  private symPhase = 0; // accumulated whole-figure rotation (radians)
+  private symSpin = 0; // accumulated regional spin (radians)
 
   // optional music reactivity
   private audioEl: HTMLAudioElement | null = null;
@@ -978,6 +981,7 @@ export class Visualizer {
       // one continuously-morphing kind-9 field driven by updateSymJourney();
       // no A/B crossfade needed (params animate every frame). Seed set A.
       this.symPhase = 0;
+      this.symSpin = 0;
       this.modeB = null;
       this.mix = 0;
       this.displayMat.uniforms.uMix.value = 0;
@@ -1072,25 +1076,35 @@ export class Visualizer {
     const L = (x: number, y: number) => x + (y - x) * m;
     const f = this.symFrom, g = this.symTo;
     const cur = this.symCur;
-    cur.numPoints = g.numPoints; // discrete; safe to switch at center (focusR≈0)
-    cur.focusR = L(f.focusR, g.focusR) * (1 + this.autoEnergy * 0.22);
-    cur.spin = L(f.spin, g.spin);
-    cur.swirl = L(f.swirl, g.swirl);
-    cur.circle = L(f.circle, g.circle);
-    cur.localSeg = L(f.localSeg, g.localSeg);
+    // DISCRETE fold counts (N, localSeg) can't be lerped — fractional folds make
+    // a sweeping seam and N pops. The journey always passes through the
+    // consolidated center (focusR=0, all points coincident), so we hold these
+    // constant per-bloom and let them switch only there, where it's invisible.
+    // Show the bloom-leg's values: center→bloom uses the target bloom (starts at
+    // R=0); bloom→center keeps the leaving bloom (ends at R=0).
+    const blo = this.symAtBloom ? g : f;
+    cur.numPoints = blo.numPoints;
+    cur.localSeg = blo.localSeg;
+    // CONTINUOUS params flow smoothly — these are what visibly morphs:
+    cur.focusR = L(f.focusR, g.focusR) * (1 + this.autoEnergy * 0.22); // open/close
+    cur.swirl = L(f.swirl, g.swirl);   // swirl*radius, no uTime amplification → safe
+    cur.circle = L(f.circle, g.circle); // rate fed into accumulated symPhase → safe
+    cur.spin = L(f.spin, g.spin);       // rate fed into accumulated symSpin → safe
 
-    // advance rigid-body rotation so the figure circles
+    // advance rotation PHASES from their rates (accumulation makes rate changes
+    // jump-free): symPhase = whole-figure circling, symSpin = regional spin.
     this.symPhase += dt * cur.circle * TAU;
+    this.symSpin += dt * cur.spin * TAU;
 
     // write kind-9 slots: numPoints=pts[3], focusR=orbitRadius[10],
-    // globalPhase=bubbleRate[4], spinRate=rotSpeed[7], swirl=driftAmt[5], localSeg=seg[1]
+    // globalPhase=bubbleRate[4], spinPhase=rotSpeed[7], swirl=driftAmt[5], localSeg=seg[1]
     const u = this.uAVals;
     u[0] = 9;
     u[3] = cur.numPoints;
     u[1] = cur.localSeg;
     u[10] = cur.focusR;
     u[4] = this.symPhase;
-    u[7] = cur.spin;
+    u[7] = this.symSpin;
     u[5] = cur.swirl;
   }
 
