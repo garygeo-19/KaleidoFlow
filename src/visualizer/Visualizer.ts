@@ -32,13 +32,14 @@ type KaleidoMode = {
   centerPull: number; // orbital: gravity/weight of the center anchor (0 = none)
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
-  auto?: "cycle" | "music" | "symmetry" | "surface"; // special: auto-choreography driver (no own geometry)
+  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 const KALEIDO_MODES: KaleidoMode[] = [
   // ── auto-choreography leads: these are the headline modes; symmetry is default ──
   { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
+  { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
   { name: "auto · music", kind: -1, ...K0, auto: "music" },
   { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
   { name: "off", kind: 0, ...K0 },
@@ -377,9 +378,24 @@ const fadeFrag = /* glsl */ `
   precision highp float;
   uniform sampler2D tPrev;
   uniform float uDecay;
+  uniform float uTrailBlur;   // 0 = crisp streaks, >0 = isotropic softening (px)
+  uniform vec2 uTexel;        // 1/resolution
   varying vec2 vUv;
   void main() {
-    gl_FragColor = texture2D(tPrev, vUv) * uDecay;
+    vec4 c;
+    if (uTrailBlur < 0.01) {
+      c = texture2D(tPrev, vUv);
+    } else {
+      // cheap separable-ish 5-tap isotropic blur: rounds long directional streaks
+      // into softer ink so there are fewer linear features to reflect at seams.
+      vec2 o = uTexel * uTrailBlur;
+      c  = texture2D(tPrev, vUv) * 0.4;
+      c += texture2D(tPrev, vUv + vec2( o.x, 0.0)) * 0.15;
+      c += texture2D(tPrev, vUv + vec2(-o.x, 0.0)) * 0.15;
+      c += texture2D(tPrev, vUv + vec2(0.0,  o.y)) * 0.15;
+      c += texture2D(tPrev, vUv + vec2(0.0, -o.y)) * 0.15;
+    }
+    gl_FragColor = c * uDecay;
   }
 `;
 
@@ -393,6 +409,7 @@ const displayFrag = /* glsl */ `
   uniform float uExposure;    // auto-exposure: pulled down on loud parts (1 = neutral)
   uniform float uMix;         // 0 = show set A, 1 = show set B (crossfade dissolve)
   uniform float uSeamSoft;    // 0 = hard mirror seams, 1 = strongly feathered seams
+  uniform float uRotational;  // 0 = mirror fold (symMorph), 1 = rotational (rotMorph, no seam)
   // Two full parameter sets so we can crossfade between any two presets.
   // Layout: 0 kind, 1 segments, 2 rings, 3 points, 4 bubbleRate, 5 driftAmt,
   // 6 driftSpeed, 7 rotSpeed, 8 segPerPoint, 9 blendSharp, 10 orbitRadius,
@@ -642,27 +659,76 @@ const displayFrag = /* glsl */ `
     return sqrt(x * x + k * k) - k;
   }
 
+  // distance (in [0..1] of a half-sector) from the nearest fold line of a fold
+  // whose half-angle measure is halfAng. 0 = right on the seam, 1 = mid-wedge.
+  float seamProximity(float foldedAbs, float halfAng) {
+    return clamp(foldedAbs / max(halfAng, 1e-4), 0.0, 1.0);
+  }
+
+  // symMorph now also returns a brightness weight via outW (1 mid-wedge, dips
+  // toward the seams) so the doubled-up reflected streak fades into darkness
+  // instead of glowing as a hard line. uSeamSoft drives both the wavy warp and
+  // the feather depth.
   vec2 symMorph(vec2 uv, float aspect, float numPoints, float focusR,
-                float globalPhase, float spinPhase, float swirl, float localSeg) {
+                float globalPhase, float spinPhase, float swirl, float localSeg,
+                out float outW) {
     vec2 p = uv - 0.5;
     p.x *= aspect;
     float r = length(p);
     float a = atan(p.y, p.x) - globalPhase;       // rotate whole figure
     float sector = TAU / max(numPoints, 1.0);
+    // (B) WAVY SEAM: perturb the angle with noise that is PERIODIC over the
+    // sector (so the result stays N-fold symmetric) — the seam wanders instead of
+    // being a ruler-straight line. Amplitude scales with uSeamSoft + radius.
+    float wob = sin(a * numPoints + uTime * 0.3) * snoise(vec3(cos(a)*1.7, sin(a)*1.7, uTime*0.05));
+    a += wob * uSeamSoft * 0.10;
     a = mod(a, sector);
-    float kS = uSeamSoft * 0.16 * sector;          // seam feather scaled to sector
-    a = softFold(a - sector * 0.5, kS);            // rounded mirror within sector
-    p = r * vec2(cos(a), sin(a));
+    float kS = uSeamSoft * 0.16 * sector;          // rounded crease feather
+    float foldedS = softFold(a - sector * 0.5, kS);
+    float seamW = seamProximity(foldedS, sector * 0.5);
+    p = r * vec2(cos(foldedS), sin(foldedS));
     vec2 c = vec2(focusR, 0.0);                     // focal point on the sector midline
     vec2 q = p - c;
     float rr = length(q);
-    // spinPhase is an ACCUMULATED angle (not rate*uTime) so changing the spin
-    // speed never causes a jump — the regional pattern's rotation stays C1-smooth.
     float aa = atan(q.y, q.x) + spinPhase + swirl * rr; // regional spin + swirl
     float lseg = TAU / max(localSeg, 1.0);
     aa = mod(aa, lseg);
-    float kL = uSeamSoft * 0.16 * lseg;            // soften the regional fold seam too
-    aa = softFold(aa - lseg * 0.5, kL);
+    float kL = uSeamSoft * 0.16 * lseg;
+    float foldedL = softFold(aa - lseg * 0.5, kL);
+    float seamWL = seamProximity(foldedL, lseg * 0.5);
+    q = rr * vec2(cos(foldedL), sin(foldedL));
+    p = c + q;
+    p.x /= aspect;
+    // (A) FEATHER: dip brightness toward each seam. smoothstep over a band whose
+    // width is uSeamSoft; 1 mid-wedge → dips near the line. Combine both folds.
+    float band = mix(0.0, 0.5, uSeamSoft);
+    float wS = smoothstep(0.0, band + 1e-3, seamW);
+    float wL = smoothstep(0.0, band + 1e-3, seamWL);
+    outW = mix(1.0, wS * wL, clamp(uSeamSoft, 0.0, 1.0));
+    return p + 0.5;
+  }
+
+  // (E) ROTATIONAL blend — NO mirror fold, so NO seam can form. Instead of
+  // reflecting, we map the angle into one sector by pure rotation (mod, no abs).
+  // That gives cyclic/rotational (pinwheel) symmetry: N rotated copies meet
+  // edge-to-edge with matching content, so the wedge boundary is continuous —
+  // no doubled reflected streak, no stretch line. localSeg adds an inner
+  // rotational fold around the focal point. Reads more "spiral" than "mirror".
+  vec2 rotMorph(vec2 uv, float aspect, float numPoints, float focusR,
+                float globalPhase, float spinPhase, float swirl, float localSeg) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    float r = length(p);
+    float a = atan(p.y, p.x) - globalPhase;
+    float sector = TAU / max(numPoints, 1.0);
+    a = mod(a, sector);                 // rotate into sector — NO abs() = no mirror
+    p = r * vec2(cos(a), sin(a));
+    vec2 c = vec2(focusR, 0.0);
+    vec2 q = p - c;
+    float rr = length(q);
+    float aa = atan(q.y, q.x) + spinPhase + swirl * rr;
+    float lseg = TAU / max(localSeg, 1.0);
+    aa = mod(aa, lseg);                 // inner rotation, also no mirror
     q = rr * vec2(cos(aa), sin(aa));
     p = c + q;
     p.x /= aspect;
@@ -689,7 +755,7 @@ const displayFrag = /* glsl */ `
     else if (k == 8) return symSplit(uv, aspect, pts, segPerPoint, rotSpeed, orbitRadius, driftAmt, orbitSpeed);
     // symMorph (unified morph space): numPoints=pts, focusR=orbitRadius,
     //   globalPhase=bubbleRate, spinRate=rotSpeed, swirl=driftAmt, localSeg=seg
-    else if (k == 9) return symMorph(uv, aspect, pts, orbitRadius, bubbleRate, rotSpeed, driftAmt, seg);
+    else if (k == 9) { float w; return symMorph(uv, aspect, pts, orbitRadius, bubbleRate, rotSpeed, driftAmt, seg, w); }
     return uv; // 0 = off
   }
 
@@ -711,9 +777,23 @@ const displayFrag = /* glsl */ `
       float gPhase = mix(uA[4],  uB[4],  m);
       float spin   = mix(uA[7],  uB[7],  m);
       float swirl  = mix(uA[5],  uB[5],  m);
-      vec2 uvA = symMorph(vUv, aspect, uA[3], focusR, gPhase, spin, swirl, uA[1]);
-      vec2 uvB = symMorph(vUv, aspect, uB[3], focusR, gPhase, spin, swirl, uB[1]);
-      col = mix(texture2D(tTrail, uvA).rgb, texture2D(tTrail, uvB).rgb, m);
+      vec3 cA, cB;
+      if (uRotational > 0.5) {
+        // (E) rotational: no mirror fold → no seam, no feather needed
+        vec2 uvA = rotMorph(vUv, aspect, uA[3], focusR, gPhase, spin, swirl, uA[1]);
+        vec2 uvB = rotMorph(vUv, aspect, uB[3], focusR, gPhase, spin, swirl, uB[1]);
+        cA = texture2D(tTrail, uvA).rgb;
+        cB = texture2D(tTrail, uvB).rgb;
+      } else {
+        // (A+B) mirror fold with feather: symMorph returns a seam-weight that
+        // dims the doubled reflected streak so it fades instead of glowing.
+        float wA, wB;
+        vec2 uvA = symMorph(vUv, aspect, uA[3], focusR, gPhase, spin, swirl, uA[1], wA);
+        vec2 uvB = symMorph(vUv, aspect, uB[3], focusR, gPhase, spin, swirl, uB[1], wB);
+        cA = texture2D(tTrail, uvA).rgb * wA;
+        cB = texture2D(tTrail, uvB).rgb * wB;
+      }
+      col = mix(cA, cB, m);
     } else {
       vec2 uvA = mapK(vUv, aspect, uA[0],uA[1],uA[2],uA[3],uA[4],uA[5],uA[6],uA[7],uA[8],uA[9],uA[10],uA[11],uA[12],uA[13],uA[14]);
       col = texture2D(tTrail, uvA).rgb;
@@ -786,6 +866,9 @@ export class Visualizer {
   private breathePeak = 4;
   // base brightness; music modulates around it
   private intensity = 0.4;
+  // seam treatment + trail roundness (live-tunable via keys)
+  private seamSoft = 0.6;
+  private trailBlur = 0.0;
 
   // kaleidoscope crossfade: uAVals shown when mix==0, dissolving toward uBVals.
   private uAVals: number[] = new Array(15).fill(0);
@@ -795,7 +878,7 @@ export class Visualizer {
   private mix = 0;
   private mixDur = 1.2;
   // auto-choreography driver
-  private autoMode: "cycle" | "music" | "symmetry" | "surface" | null = null;
+  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | null = null;
   private autoLabel = "";
   private autoTimer = 0; // cycle: time on current step
   private autoStep = 0; // cycle: index into AUTO_PROGRAM
@@ -1004,6 +1087,8 @@ export class Visualizer {
       uniforms: {
         tPrev: { value: null },
         uDecay: { value: 0.93 },
+        uTrailBlur: { value: 0.0 },
+        uTexel: { value: new THREE.Vector2(1 / 2, 1 / 2) },
       },
       vertexShader: QUAD_VERT,
       fragmentShader: fadeFrag,
@@ -1021,6 +1106,7 @@ export class Visualizer {
         uExposure: { value: 1.0 },
         uMix: { value: 0 },
         uSeamSoft: { value: 0.6 },
+        uRotational: { value: 0 },
         uA: { value: this.uAVals },
         uB: { value: this.uBVals },
       },
@@ -1047,6 +1133,7 @@ export class Visualizer {
     // would squash them). Never below 1 (don't squeeze a tall window).
     const stretch = Math.max(1, Math.pow(Math.max(1, w / h), 0.75));
     this.pointsMat.uniforms.uWorldStretch.value = stretch;
+    this.fadeMat.uniforms.uTexel.value.set(1 / (w * dpr), 1 / (h * dpr));
   };
 
   private onKey = (e: KeyboardEvent) => {
@@ -1069,8 +1156,28 @@ export class Visualizer {
       this.setBreathePeak(this.breathePeak + 1); // bigger swell
     } else if (e.key === "-" || e.key === "_") {
       this.setBreathePeak(this.breathePeak - 1); // smaller swell
+    } else if (e.key === "s") {
+      this.setSeamSoft(this.seamSoft + 0.15); // more seam feather/wavy
+    } else if (e.key === "S") {
+      this.setSeamSoft(this.seamSoft - 0.15);
+    } else if (e.key === "b") {
+      this.setTrailBlur(this.trailBlur + 0.5); // softer (rounder) trails
+    } else if (e.key === "B") {
+      this.setTrailBlur(this.trailBlur - 0.5);
     }
   };
+
+  /** Seam feathering / wavy-seam amount (0 = hard mirror lines, ~1 = soft). */
+  private setSeamSoft(v: number) {
+    this.seamSoft = Math.min(1.5, Math.max(0, v));
+    this.displayMat.uniforms.uSeamSoft.value = this.seamSoft;
+  }
+
+  /** Isotropic trail blur in texels (0 = crisp streaks, higher = rounder ink). */
+  private setTrailBlur(v: number) {
+    this.trailBlur = Math.min(4, Math.max(0, v));
+    this.fadeMat.uniforms.uTrailBlur.value = this.trailBlur;
+  }
 
   /** Switch kaleidoscope entry by index (wraps). Auto entries start a driver. */
   private setKaleido(index: number) {
@@ -1116,7 +1223,7 @@ export class Visualizer {
   }
 
   /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
-  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface", label: string) {
+  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
     this.autoTimer = 0;
@@ -1145,7 +1252,9 @@ export class Visualizer {
       this.emitKaleidoLabel();
       return;
     }
-    if (kind === "symmetry") {
+    // pinwheel = symmetry journey but with the rotational (seamless) fold
+    this.displayMat.uniforms.uRotational.value = kind === "pinwheel" ? 1 : 0;
+    if (kind === "symmetry" || kind === "pinwheel") {
       // one continuously-morphing kind-9 field driven by updateSymJourney();
       // no A/B crossfade needed (params animate every frame). Seed set A.
       this.symPhase = 0;
@@ -1153,7 +1262,7 @@ export class Visualizer {
       this.modeB = null;
       this.mix = 0;
       this.displayMat.uniforms.uMix.value = 0;
-      this.modeA = km("auto · symmetry", { kind: 9, segments: 8 });
+      this.modeA = km(label, { kind: 9, segments: 8 });
       this.fillMode(this.modeA, this.uAVals);
       // start consolidated at center, then immediately roll a first bloom target
       this.symFrom = this.centerPose();
@@ -1392,7 +1501,7 @@ export class Visualizer {
       return;
     }
 
-    if (this.autoMode === "symmetry") {
+    if (this.autoMode === "symmetry" || this.autoMode === "pinwheel") {
       this.updateSymJourney(dt);
       return;
     }
