@@ -8,6 +8,7 @@ import type { FlowPlayer } from "../audio/flowmap";
 
 // Particle count = TEX * TEX. 512² ≈ 262k. Drop to 256 on weak GPUs.
 const TEX = 512;
+const TAU = Math.PI * 2;
 
 // Kaleidoscope families, cycled with the 'K' key.
 //  kind: 0 off · 1 radial · 2 grid · 3 polar · 4 multipoint · 5 orbital
@@ -74,6 +75,10 @@ const KALEIDO_MODES: KaleidoMode[] = [
   // symmetric multi-center: focal points split apart while staying mirror-symmetric
   { name: "sym split 2×", kind: 8, ...K0, points: 2, segPerPoint: 5, rotSpeed: 0.10, orbitRadius: 0.14, driftAmt: 0.22, orbitSpeed: 0.11 },
   { name: "sym split 4×", kind: 8, ...K0, points: 4, segPerPoint: 5, rotSpeed: 0.08, orbitRadius: 0.13, driftAmt: 0.18, orbitSpeed: 0.11 },
+  // unified symMorph space (kind 9) — the morph-friendly auto·symmetry family.
+  // slot map: splitX=orbitRadius, splitY=centerPull, spin=rotSpeed, swirl=driftAmt, moveAmp=bubbleRate, moveSpeed=orbitSpeed
+  { name: "morph · part 2", kind: 9, ...K0, segments: 8, orbitRadius: 0.22, centerPull: 0.0, rotSpeed: 0.09, driftAmt: 2.0, bubbleRate: 0.06, orbitSpeed: 0.20 },
+  { name: "morph · grid 4", kind: 9, ...K0, segments: 8, orbitRadius: 0.22, centerPull: 0.22, rotSpeed: 0.10, driftAmt: 2.6, bubbleRate: 0.09, orbitSpeed: 0.26 },
 ];
 
 // quick constructor for ad-hoc presets (low mirror counts not in the K cycle)
@@ -118,19 +123,33 @@ const AUTO_LADDER: KaleidoMode[] = [
   findMode("swarm 6 · mixed"),
 ];
 
-// AUTO "symmetry": same energy-driven ladder, but EVERY rung is the guaranteed-
-// symmetric family (kind 7). single → symmetric mirroring → symmetric orbiting →
-// symmetric balancing, climbing the fold count and motion with energy.
-const AUTO_SYM_LADDER: KaleidoMode[] = [
-  // single dropped — start on a real radial mirror, then introduce & split
-  // moving focal points (2 → 4) as energy rises, all kept mirror-symmetric.
-  km("sym mirror 4×", { kind: 7, segments: 4, rotSpeed: 0.05 }),
-  km("sym mirror 6×", { kind: 7, segments: 6, rotSpeed: 0.06 }),
-  km("sym orbit 8×", { kind: 7, segments: 8, rotSpeed: 0.10, driftAmt: 2.4, orbitRadius: 0.05, driftSpeed: 0.55 }),
-  km("split 2 · part", { kind: 8, points: 2, segPerPoint: 4, rotSpeed: 0.09, orbitRadius: 0.12, driftAmt: 0.22, orbitSpeed: 0.10 }),
-  km("split 2 · swirl", { kind: 8, points: 2, segPerPoint: 6, rotSpeed: 0.14, orbitRadius: 0.16, driftAmt: 0.26, orbitSpeed: 0.13 }),
-  km("split 4 · quad", { kind: 8, points: 4, segPerPoint: 4, rotSpeed: 0.10, orbitRadius: 0.12, driftAmt: 0.18, orbitSpeed: 0.12 }),
-  km("split 4 · bloom", { kind: 8, points: 4, segPerPoint: 6, rotSpeed: 0.06, orbitRadius: 0.14, driftAmt: 0.16, orbitSpeed: 0.10 }),
+// AUTO "symmetry" is no longer a parking energy-ladder. It's a continuous
+// choreographed JOURNEY through the unified symMorph space (kind 9), driven
+// frame-by-frame in updateSymJourney(). The focal point walks through these
+// keyframes (consolidate → 2 → 4 → circle → consolidate → bloom → loop) while
+// globalPhase advances continuously so the constellation orbits the center.
+//   focusR : 0 = one point at center; >0 = splits outward
+//   focusAng (turns, ×TAU): 0 = 2 points horizontal; 0.125 = 4 (diagonal grid)
+//   spin/swirl : per-point fold spin + radial twist (orbiting arms)
+//   circle : how fast the whole figure rotates as a rigid body (turns/sec)
+//   hold : seconds to dwell here before easing to the next keyframe
+type SymKey = {
+  name: string;
+  focusR: number;
+  focusAng: number; // in turns (multiply by TAU in the driver)
+  spin: number;
+  swirl: number;
+  circle: number;
+  hold: number;
+};
+const SYM_JOURNEY: SymKey[] = [
+  { name: "one",            focusR: 0.00, focusAng: 0.0,   spin: 0.05, swirl: 0.6, circle: 0.00, hold: 7 },
+  { name: "split two",      focusR: 0.22, focusAng: 0.0,   spin: 0.07, swirl: 1.4, circle: 0.01, hold: 7 },
+  { name: "four grid",      focusR: 0.24, focusAng: 0.125, spin: 0.08, swirl: 1.8, circle: 0.02, hold: 7 },
+  { name: "four circling",  focusR: 0.26, focusAng: 0.125, spin: 0.10, swirl: 2.6, circle: 0.09, hold: 9 },
+  { name: "two circling",   focusR: 0.24, focusAng: 0.0,   spin: 0.09, swirl: 2.0, circle: 0.07, hold: 7 },
+  { name: "consolidate",    focusR: 0.04, focusAng: 0.0,   spin: 0.06, swirl: 1.0, circle: 0.02, hold: 6 },
+  { name: "bloom",          focusR: 0.30, focusAng: 0.0625,spin: 0.14, swirl: 3.4, circle: 0.05, hold: 8 },
 ];
 
 // Cosine-gradient palettes (Inigo Quilez form): color(t) = a + b*cos(2π(c*t + d)).
@@ -521,6 +540,36 @@ const displayFrag = /* glsl */ `
     return p + 0.5;
   }
 
+  // UNIFIED symmetric morph space (the auto·symmetry family). "Intelligent
+  // symmetric points": symmetry comes from the CALCULATION, not fixed screen
+  // mirrors. We rigidly ROTATE the whole figure by globalPhase (so it circles),
+  // abs()-fold for 4-fold dihedral symmetry about the rotated axes, then place
+  // ONE focal point in polar coords (focusR, focusAng):
+  //   focusR = 0          → one point at the center (consolidated)
+  //   focusR>0, ang = 0   → 2 points;  ang = 45° → 4 points (grid)
+  // Because we rotate before folding, the constellation can orbit the center as
+  // a rigid body and still stay perfectly symmetric. spinRate spins each point's
+  // local kaleido fold; swirl adds a radius-dependent twist (orbiting arms).
+  vec2 symMorph(vec2 uv, float aspect, float seg, float focusR, float focusAng,
+                float globalPhase, float spinRate, float swirl) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    float cs = cos(globalPhase), sn = sin(globalPhase);
+    p = mat2(cs, -sn, sn, cs) * p;  // rigid rotation → the whole figure circles
+    p = abs(p);                     // 4-fold dihedral mirror (about rotated axes)
+    vec2 c = focusR * vec2(cos(focusAng), sin(focusAng)); // focal point; R=0→center
+    vec2 q = p - c;
+    float r = length(q);
+    float a = atan(q.y, q.x) + uTime * spinRate + swirl * r;
+    float seg_a = TAU / max(seg, 1.0);
+    a = mod(a, seg_a);
+    a = abs(a - seg_a * 0.5);
+    q = vec2(cos(a), sin(a)) * r;
+    p = c + q;
+    p.x /= aspect;
+    return p + 0.5;
+  }
+
   // dispatch one parameter set to its kaleidoscope mapping
   vec2 mapK(vec2 uv, float aspect,
             float kind, float seg, float rings, float pts, float bubbleRate,
@@ -539,18 +588,38 @@ const displayFrag = /* glsl */ `
     else if (k == 7) return symmetric(uv, aspect, seg, rotSpeed, driftAmt, orbitRadius, driftSpeed);
     // symSplit: splitCount=pts, segPerPoint, spin=rotSpeed, spreadBase=orbitRadius, spreadAmp=driftAmt, spreadSpeed=orbitSpeed
     else if (k == 8) return symSplit(uv, aspect, pts, segPerPoint, rotSpeed, orbitRadius, driftAmt, orbitSpeed);
+    // symMorph (unified morph space): seg, focusR=orbitRadius, focusAng=centerPull,
+    //   globalPhase=bubbleRate, spinRate=rotSpeed, swirl=driftAmt
+    else if (k == 9) return symMorph(uv, aspect, seg, orbitRadius, centerPull, bubbleRate, rotSpeed, driftAmt);
     return uv; // 0 = off
   }
 
   void main() {
     float aspect = uResolution.x / uResolution.y;
+    float m = smoothstep(0.0, 1.0, uMix);
 
-    vec2 uvA = mapK(vUv, aspect, uA[0],uA[1],uA[2],uA[3],uA[4],uA[5],uA[6],uA[7],uA[8],uA[9],uA[10],uA[11],uA[12],uA[13],uA[14]);
-    vec3 col = texture2D(tTrail, uvA).rgb;
-    if (uMix > 0.001) {
-      vec2 uvB = mapK(vUv, aspect, uB[0],uB[1],uB[2],uB[3],uB[4],uB[5],uB[6],uB[7],uB[8],uB[9],uB[10],uB[11],uB[12],uB[13],uB[14]);
-      vec3 colB = texture2D(tTrail, uvB).rgb;
-      col = mix(col, colB, smoothstep(0.0, 1.0, uMix)); // ease-in-out dissolve
+    vec3 col;
+    bool bothMorph = int(uA[0] + 0.5) == 9 && int(uB[0] + 0.5) == 9;
+    if (uMix > 0.001 && bothMorph) {
+      // PARAMETER morph: lerp the symMorph params and sample the trail ONCE, so
+      // the same particle field continuously reshapes (focus radius/angle slide,
+      // figure rotates) instead of one image cross-dissolving over another.
+      float seg    = mix(uA[1],  uB[1],  m);
+      float focusR = mix(uA[10], uB[10], m);
+      float focusA = mix(uA[12], uB[12], m);
+      float gPhase = mix(uA[4],  uB[4],  m);
+      float spin   = mix(uA[7],  uB[7],  m);
+      float swirl  = mix(uA[5],  uB[5],  m);
+      vec2 uv = symMorph(vUv, aspect, seg, focusR, focusA, gPhase, spin, swirl);
+      col = texture2D(tTrail, uv).rgb;
+    } else {
+      vec2 uvA = mapK(vUv, aspect, uA[0],uA[1],uA[2],uA[3],uA[4],uA[5],uA[6],uA[7],uA[8],uA[9],uA[10],uA[11],uA[12],uA[13],uA[14]);
+      col = texture2D(tTrail, uvA).rgb;
+      if (uMix > 0.001) {
+        vec2 uvB = mapK(vUv, aspect, uB[0],uB[1],uB[2],uB[3],uB[4],uB[5],uB[6],uB[7],uB[8],uB[9],uB[10],uB[11],uB[12],uB[13],uB[14]);
+        vec3 colB = texture2D(tTrail, uvB).rgb;
+        col = mix(col, colB, m); // cross-family fallback: ease-in-out dissolve
+      }
     }
 
     col *= uExposure;                            // auto-exposure (tames loud blowouts)
@@ -619,6 +688,10 @@ export class Visualizer {
   private autoEnergy = 0; // music: slow-smoothed track energy
   private autoTier = 0; // music: current rung in AUTO_LADDER
   private autoCooldown = 0; // music: min dwell before next rung change
+  // symmetry journey driver
+  private symKey = 0; // index into SYM_JOURNEY
+  private symT = 0; // 0..1 progress through current keyframe
+  private symPhase = 0; // accumulated rigid-body rotation (radians)
 
   // optional music reactivity
   private audioEl: HTMLAudioElement | null = null;
@@ -879,7 +952,7 @@ export class Visualizer {
     this.onKaleidoChange(this.autoMode ? `${this.autoLabel} → ${cur}` : cur);
   }
 
-  /** Enter an auto-choreography mode (timed wander or music-energy ladder). */
+  /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
   private startAuto(kind: "cycle" | "music" | "symmetry", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
@@ -888,20 +961,80 @@ export class Visualizer {
     this.autoEnergy = 0;
     this.autoTier = 0;
     this.autoCooldown = 0;
-    const first = kind === "cycle" ? AUTO_PROGRAM[0] : this.ladder()[0];
-    this.transitionTo(first, 2.0);
+    if (kind === "symmetry") {
+      // one continuously-morphing kind-9 field driven by updateSymJourney();
+      // no A/B crossfade needed (params animate every frame). Seed set A.
+      this.symT = 0;
+      this.symKey = 0;
+      this.symPhase = 0;
+      this.modeB = null;
+      this.mix = 0;
+      this.displayMat.uniforms.uMix.value = 0;
+      this.modeA = km("auto · symmetry", { kind: 9, segments: 8 });
+      this.fillMode(this.modeA, this.uAVals);
+      this.updateSymJourney(0); // write initial params
+    } else {
+      const first = kind === "cycle" ? AUTO_PROGRAM[0] : AUTO_LADDER[0];
+      this.transitionTo(first, 2.0);
+    }
     this.emitKaleidoLabel();
   }
 
-  /** The energy ladder for the active auto mode. */
-  private ladder(): KaleidoMode[] {
-    return this.autoMode === "symmetry" ? AUTO_SYM_LADDER : AUTO_LADDER;
+  /** Continuous symmetry journey: eased walk through SYM_JOURNEY keyframes,
+   *  writing kind-9 params straight into uAVals so the SAME field morphs. The
+   *  whole figure also rotates (symPhase) so the constellation circles. Music
+   *  energy modulates pace + radius so it breathes with the track. */
+  private updateSymJourney(dt: number) {
+    // music energy (or a slow idle drift) → pace + size of the journey
+    let e: number;
+    if (this.audioEl && this.flow && !this.audioEl.paused && !this.audioEl.ended) {
+      const s = this.flow.sample(this.audioEl.currentTime);
+      e = Math.min(1, s.loudness * 1.2 + s.bass * 0.2);
+    } else {
+      e = 0.5 + 0.5 * Math.sin(this.clock.elapsedTime * 0.06);
+    }
+    this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5));
+
+    const cur = SYM_JOURNEY[this.symKey];
+    const nxt = SYM_JOURNEY[(this.symKey + 1) % SYM_JOURNEY.length];
+    // advance along the current keyframe; louder = a little faster through it
+    const pace = 0.6 + this.autoEnergy * 0.9;
+    this.symT += (dt / cur.hold) * pace;
+    let seg = 0;
+    if (this.symT >= 1) {
+      this.symT -= 1;
+      this.symKey = (this.symKey + 1) % SYM_JOURNEY.length;
+      seg = 1;
+    }
+    const a = seg ? SYM_JOURNEY[this.symKey] : cur;
+    const b = seg ? SYM_JOURNEY[(this.symKey + 1) % SYM_JOURNEY.length] : nxt;
+    const m = this.symT * this.symT * (3 - 2 * this.symT); // smoothstep ease
+    const lerp = (x: number, y: number) => x + (y - x) * m;
+    // energy lifts the focal radius a touch so crescendos spread wider
+    const rBoost = 1 + this.autoEnergy * 0.25;
+    const focusR = lerp(a.focusR, b.focusR) * rBoost;
+    const focusAng = lerp(a.focusAng, b.focusAng) * TAU;
+    const spin = lerp(a.spin, b.spin);
+    const swirl = lerp(a.swirl, b.swirl);
+    const circle = lerp(a.circle, b.circle);
+    // advance the rigid-body rotation so the figure actually circles
+    this.symPhase += dt * circle * TAU;
+    // write kind-9 slots: focusR=orbitRadius[10], focusAng=centerPull[12],
+    // globalPhase=bubbleRate[4], spinRate=rotSpeed[7], swirl=driftAmt[5]
+    const u = this.uAVals;
+    u[0] = 9; u[1] = 8;
+    u[10] = focusR; u[12] = focusAng; u[4] = this.symPhase; u[7] = spin; u[5] = swirl;
   }
 
   /** Advance whichever auto driver is active; may trigger a crossfade. */
   private updateAuto(dt: number) {
     if (!this.autoMode) return;
     this.autoCooldown = Math.max(0, this.autoCooldown - dt);
+
+    if (this.autoMode === "symmetry") {
+      this.updateSymJourney(dt);
+      return;
+    }
 
     if (this.autoMode === "cycle") {
       this.autoTimer += dt;
@@ -914,7 +1047,7 @@ export class Visualizer {
       return;
     }
 
-    // music / symmetry: pick the ladder rung from slow-smoothed track energy.
+    // music: pick the ladder rung from slow-smoothed track energy.
     // When nothing is playing, drift the energy on a slow sine so it still
     // wanders the ladder (nice as an idle screensaver without a track).
     let e: number;
@@ -925,7 +1058,7 @@ export class Visualizer {
       e = 0.5 + 0.5 * Math.sin(this.clock.elapsedTime * 0.06);
     }
     this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5)); // ~2s smoothing
-    const ladder = this.ladder();
+    const ladder = AUTO_LADDER;
     const top = ladder.length - 1;
     const lvl = Math.max(0, Math.min(1, this.autoEnergy)) * top;
     if (!this.modeB && this.autoCooldown <= 0) {
