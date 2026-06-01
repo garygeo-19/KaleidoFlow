@@ -291,6 +291,7 @@ const particleVert = /* glsl */ `
   uniform float uTime;
   uniform float uSurfaceDraw; // 1 = depth-fade (water surface), 0 = life envelope
   uniform float uSurfaceBand; // half-thickness of the bright surface slab
+  uniform float uWorldStretch; // horizontal world scale so content fills a wide screen
   attribute vec2 ref;
   varying float vSpeed;
   varying float vLife;
@@ -308,7 +309,11 @@ const particleVert = /* glsl */ `
     float seed = hash12(ref * vec2(91.7, 13.3));
     vSeed = seed;
 
-    vec4 mv = modelViewMatrix * vec4(posLife.xyz, 1.0);
+    // stretch the world horizontally at draw time so the (isotropic) field fills
+    // a wide screen — the simulation/symmetry stays perfectly circular; only the
+    // rendered shape widens. Keeps z intact for the depth/surface model.
+    vec3 wp = vec3(posLife.x * uWorldStretch, posLife.y, posLife.z);
+    vec4 mv = modelViewMatrix * vec4(wp, 1.0);
     gl_Position = projectionMatrix * mv;
 
     // SURFACE mode: a particle is brightest at the surface plane (z≈0) and fades
@@ -929,6 +934,7 @@ export class Visualizer {
         uColorSpread: { value: 0.4 },
         uSurfaceDraw: { value: 0 },
         uSurfaceBand: { value: 0.7 },
+        uWorldStretch: { value: 1.0 },
         // palette uniform values ARE the cur* vectors, lerped in place each frame
         uPalA: { value: this.curA },
         uPalB: { value: this.curB },
@@ -1002,6 +1008,11 @@ export class Visualizer {
     this.trailA.setSize(w * dpr, h * dpr);
     this.trailB.setSize(w * dpr, h * dpr);
     this.displayMat.uniforms.uResolution.value.set(w * dpr, h * dpr);
+    // widen the (isotropic) world to fill a landscape screen. aspect^0.75 fills
+    // most of the width while keeping swirls only mildly elliptical (full aspect
+    // would squash them). Never below 1 (don't squeeze a tall window).
+    const stretch = Math.max(1, Math.pow(Math.max(1, w / h), 0.75));
+    this.pointsMat.uniforms.uWorldStretch.value = stretch;
   };
 
   private onKey = (e: KeyboardEvent) => {
