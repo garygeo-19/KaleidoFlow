@@ -700,17 +700,20 @@ const displayFrag = /* glsl */ `
     vec3 col;
     bool bothMorph = int(uA[0] + 0.5) == 9 && int(uB[0] + 0.5) == 9;
     if (uMix > 0.001 && bothMorph) {
-      // PARAMETER morph: lerp the symMorph params and sample the trail ONCE, so
-      // the same particle field continuously reshapes (focus radius slides,
-      // figure rotates) instead of one image cross-dissolving over another.
-      float npts   = mix(uA[3],  uB[3],  m);
+      // STRUCTURE crossfade. The continuous params (focusR, rotation, swirl) are
+      // shared/lerped so the underlying flow is one continuous field; only the
+      // FOLD STRUCTURE (point count N + regional fold) differs between A and B.
+      // We render the fold both ways — each with an INTEGER N (never fractional,
+      // which would make a sweeping seam) — and dissolve the results. So a
+      // count change (8→6) eases in as one symmetry quietly giving way to the
+      // other over the same flowing particles, instead of an instant re-tile.
       float focusR = mix(uA[10], uB[10], m);
       float gPhase = mix(uA[4],  uB[4],  m);
       float spin   = mix(uA[7],  uB[7],  m);
       float swirl  = mix(uA[5],  uB[5],  m);
-      float lseg   = mix(uA[1],  uB[1],  m);
-      vec2 uv = symMorph(vUv, aspect, npts, focusR, gPhase, spin, swirl, lseg);
-      col = texture2D(tTrail, uv).rgb;
+      vec2 uvA = symMorph(vUv, aspect, uA[3], focusR, gPhase, spin, swirl, uA[1]);
+      vec2 uvB = symMorph(vUv, aspect, uB[3], focusR, gPhase, spin, swirl, uB[1]);
+      col = mix(texture2D(tTrail, uvA).rgb, texture2D(tTrail, uvB).rgb, m);
     } else {
       vec2 uvA = mapK(vUv, aspect, uA[0],uA[1],uA[2],uA[3],uA[4],uA[5],uA[6],uA[7],uA[8],uA[9],uA[10],uA[11],uA[12],uA[13],uA[14]);
       col = texture2D(tTrail, uvA).rgb;
@@ -810,6 +813,12 @@ export class Visualizer {
   private symPendingN = 2; // point count chosen at center for the next bloom
   private symPhase = 0; // accumulated whole-figure rotation (radians)
   private symSpin = 0; // accumulated regional spin (radians)
+  // fold-structure crossfade: dissolve old N/fold → new over symStructMix
+  private symStructN = 2; // current (B) fold count
+  private symStructSeg = 6; // current (B) regional fold
+  private symOldN = 2; // previous (A) fold count being faded out
+  private symOldSeg = 6; // previous (A) regional fold
+  private symStructMix = 1; // 0→1 crossfade of A(old)→B(new) structure (1 = settled)
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1153,6 +1162,10 @@ export class Visualizer {
       this.symAtBloom = false; // next arrival is a bloom
       this.symT = 1; // force an immediate retarget on first update
       this.symHold = 0;
+      // start with both structures equal (no fade in progress)
+      this.symStructN = this.symOldN = this.symFrom.numPoints;
+      this.symStructSeg = this.symOldSeg = this.symFrom.localSeg;
+      this.symStructMix = 1;
       this.updateSymJourney(0); // write initial params
     } else {
       const first = kind === "cycle" ? AUTO_PROGRAM[0] : AUTO_LADDER[0];
@@ -1235,36 +1248,50 @@ export class Visualizer {
     const L = (x: number, y: number) => x + (y - x) * m;
     const f = this.symFrom, g = this.symTo;
     const cur = this.symCur;
-    // DISCRETE fold counts (N, localSeg) can't be lerped — fractional folds make
-    // a sweeping seam and N pops. The journey always passes through the
-    // consolidated center (focusR=0, all points coincident), so we hold these
-    // constant per-bloom and let them switch only there, where it's invisible.
-    // Show the bloom-leg's values: center→bloom uses the target bloom (starts at
-    // R=0); bloom→center keeps the leaving bloom (ends at R=0).
-    const blo = this.symAtBloom ? g : f;
-    cur.numPoints = blo.numPoints;
-    cur.localSeg = blo.localSeg;
     // CONTINUOUS params flow smoothly — these are what visibly morphs:
     cur.focusR = L(f.focusR, g.focusR) * (1 + this.autoEnergy * 0.22); // open/close
     cur.swirl = L(f.swirl, g.swirl);   // swirl*radius, no uTime amplification → safe
     cur.circle = L(f.circle, g.circle); // rate fed into accumulated symPhase → safe
     cur.spin = L(f.spin, g.spin);       // rate fed into accumulated symSpin → safe
 
+    // DISCRETE fold structure (N, localSeg). A post-process fold can't lerp these
+    // without an instant re-tile — so when the target structure differs from
+    // what's showing, we CROSSFADE the two integer folds over the SAME flowing
+    // field (symStructMix 0→1 over ~2.5s): old symmetry quietly gives way to new.
+    const targetN = (this.symAtBloom ? g : f).numPoints;
+    const targetSeg = (this.symAtBloom ? g : f).localSeg;
+    if (targetN !== this.symStructN || targetSeg !== this.symStructSeg) {
+      // a new structure to reach: park the current one as "old", begin the fade
+      this.symOldN = this.symStructN;
+      this.symOldSeg = this.symStructSeg;
+      this.symStructN = targetN;
+      this.symStructSeg = targetSeg;
+      this.symStructMix = 0;
+    }
+    if (this.symStructMix < 1) {
+      this.symStructMix = Math.min(1, this.symStructMix + dt / 2.5); // ~2.5s fade
+    }
+
     // advance rotation PHASES from their rates (accumulation makes rate changes
     // jump-free): symPhase = whole-figure circling, symSpin = regional spin.
     this.symPhase += dt * cur.circle * TAU;
     this.symSpin += dt * cur.spin * TAU;
 
-    // write kind-9 slots: numPoints=pts[3], focusR=orbitRadius[10],
-    // globalPhase=bubbleRate[4], spinPhase=rotSpeed[7], swirl=driftAmt[5], localSeg=seg[1]
-    const u = this.uAVals;
-    u[0] = 9;
-    u[3] = cur.numPoints;
-    u[1] = cur.localSeg;
-    u[10] = cur.focusR;
-    u[4] = this.symPhase;
-    u[7] = this.symSpin;
-    u[5] = cur.swirl;
+    // write kind-9 slots into BOTH sets. Continuous params are identical (same
+    // flowing field); only the fold structure differs — A=old, B=new — and uMix
+    // dissolves between them. After the fade A==B so it's a no-op until next N.
+    const A = this.uAVals, B = this.uBVals;
+    const mix = this.symStructMix * this.symStructMix * (3 - 2 * this.symStructMix);
+    for (const u of [A, B]) {
+      u[0] = 9;
+      u[10] = cur.focusR;
+      u[4] = this.symPhase;
+      u[7] = this.symSpin;
+      u[5] = cur.swirl;
+    }
+    A[3] = this.symOldN; A[1] = this.symOldSeg;
+    B[3] = this.symStructN; B[1] = this.symStructSeg;
+    this.displayMat.uniforms.uMix.value = mix;
   }
 
   /** Toggle the water-surface simulation (symmetry in the force field). When on,
@@ -1470,6 +1497,7 @@ export class Visualizer {
     this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed;
     this.displayMat.uniforms.uContrast.value = 1.0; // neutral when no track plays
     this.displayMat.uniforms.uExposure.value = 1.0;
+    this.pointsMat.uniforms.uColorSpread.value = 0.4;
     this.uAVals[14] = this.modeA.points; // show all centers when idle
     if (this.modeB) this.uBVals[14] = this.modeB.points;
   }
@@ -1481,16 +1509,21 @@ export class Visualizer {
     // brightness pulses with the beat + overall loudness
     this.pointsMat.uniforms.uIntensity.value =
       this.intensity * (0.5 + s.loudness * 0.7 + s.pulse * 1.1);
-    // particles swell on the kick
+    // particles swell on the kick (kept, this is "breathing" not travel)
     this.pointsMat.uniforms.uSizeMax.value =
-      this.breathePeak * (1.0 + s.pulse * 0.7 + s.bass * 0.4);
-    // bass surges the flow field strength + particle speed
-    this.velocityVar.material.uniforms.uCurlStrength.value = 1.0 + s.bass * 1.5;
-    this.positionVar.material.uniforms.uSpeed.value = 1.0 + s.bass * 0.7 + s.pulse * 0.5;
-    // overall energy nudges how fast the field evolves
-    this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed * (1.0 + s.loudness * 0.6);
-    // treble shimmer drifts the palette a touch faster
-    this.pointsMat.uniforms.uColorPhase.value += s.treble * dt * 0.05;
+      this.breathePeak * (1.0 + s.pulse * 0.5 + s.bass * 0.3);
+    // MUSIC → COLOR, not travel. The beat mainly moves the palette/hue, only
+    // gently nudging the flow so particles don't lurch around on every kick.
+    this.velocityVar.material.uniforms.uCurlStrength.value = 1.0 + s.bass * 0.5;
+    this.positionVar.material.uniforms.uSpeed.value = 1.0 + s.bass * 0.2 + s.pulse * 0.15;
+    this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed * (1.0 + s.loudness * 0.3);
+    // color is where the music really lives now: beat + treble push the hue
+    // phase, and per-particle color spread widens with energy so the palette
+    // visibly shifts/shimmers on the beat instead of the particles jumping.
+    this.pointsMat.uniforms.uColorPhase.value += (s.treble * 0.10 + s.pulse * 0.12 + s.loudness * 0.04) * dt;
+    const tgtSpread = 0.4 + s.loudness * 0.5 + s.pulse * 0.3;
+    const sp = this.pointsMat.uniforms.uColorSpread;
+    sp.value += (tgtSpread - sp.value) * (1 - Math.exp(-dt * 6));
     // brightness contrast tracks volume: mellow = soft/flat, loud = punchy.
     // ease toward the target so it swells with the music rather than flickering.
     const targetContrast = 0.95 + s.loudness * 0.55 + s.pulse * 0.12;
