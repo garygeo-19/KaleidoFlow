@@ -32,11 +32,12 @@ type KaleidoMode = {
   centerPull: number; // orbital: gravity/weight of the center anchor (0 = none)
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
-  auto?: "cycle" | "music" | "symmetry"; // special: auto-choreography driver (no own geometry)
+  auto?: "cycle" | "music" | "symmetry" | "surface"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 const KALEIDO_MODES: KaleidoMode[] = [
   // ── auto-choreography leads: these are the headline modes; symmetry is default ──
+  { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
   { name: "auto · music", kind: -1, ...K0, auto: "music" },
   { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
@@ -148,6 +149,19 @@ type SymPose = {
 // triangle. Weighted toward the prettier low counts but reaching up to 16.
 const SYM_POINT_COUNTS = [2, 3, 4, 4, 6, 8, 16];
 
+// SURFACE (water) mode pose: N swirl SOURCES on a ring in the flow field. The
+// field is the sum of N identical evenly-spaced sources, so it is exactly N-fold
+// symmetric and particles flow through it (no post-process mirror). radius=0
+// pulls all sources to the center (consolidated) — where N can change invisibly.
+type SurfPose = {
+  numPoints: number;
+  radius: number; // ring radius of the sources
+  swirl: number; // tangential strength
+  pull: number; // inward pull strength
+  falloff: number; // locality of each source
+};
+const SURF_POINT_COUNTS = [2, 3, 4, 4, 5, 6, 8];
+
 // Cosine-gradient palettes (Inigo Quilez form): color(t) = a + b*cos(2π(c*t + d)).
 type Palette = {
   name: string;
@@ -171,14 +185,56 @@ const velocityFrag = /* glsl */ `
   uniform float uFieldSpeed;
   uniform float uInertia;
   uniform float uCurlStrength;
+  // ── surface (water) mode: symmetry lives in the FORCE FIELD ──
+  uniform float uSurface;     // 0 = legacy curl, 1 = surface flow
+  uniform float uSrcCount;    // N swirl sources on the ring (1..16)
+  uniform float uSrcRadius;   // ring radius of the sources (0 = all at center)
+  uniform float uSrcRot;      // accumulated ring rotation (radians)
+  uniform float uSrcSwirl;    // tangential (swirl) strength per source
+  uniform float uSrcPull;     // inward pull strength per source
+  uniform float uSrcFalloff;  // how tightly each source's influence is localized
+  uniform float uUpdraft;     // vertical lift near a source (bubbling up)
+  uniform float uSettle;      // pull of z back toward the surface plane
+  uniform float uSwirlNoise;  // small symmetric noise for organic wobble
 
   ${SIMPLEX3D}
   ${CURL}
+
+  const float TAU_V = 6.28318530718;
 
   void main() {
     vec2 uv = gl_FragCoord.xy / resolution.xy;
     vec3 pos = texture2D(texturePosition, uv).xyz;
     vec3 vel = texture2D(textureVelocity, uv).xyz;
+
+    if (uSurface > 0.5) {
+      // Sum of N identical, evenly-spaced swirl sources. Rotating space by
+      // TAU/N permutes the sources, leaving this sum invariant → the field is
+      // EXACTLY N-fold rotationally symmetric, so particles flow symmetrically
+      // without any mirror fold. Each source swirls (tangential) + draws inward.
+      vec2 acc = vec2(0.0);
+      float fall = 0.0;
+      float N = max(uSrcCount, 1.0);
+      for (int k = 0; k < 16; k++) {
+        if (float(k) >= N) break;
+        float ang = uSrcRot + TAU_V * float(k) / N;
+        vec2 sc = uSrcRadius * vec2(cos(ang), sin(ang));
+        vec2 d = pos.xy - sc;
+        float dist = length(d) + 1e-3;
+        float f = exp(-dist * uSrcFalloff);
+        vec2 tang = vec2(-d.y, d.x) / dist;   // swirl around source
+        vec2 rad  = -d / dist;                // pull toward source
+        acc += (tang * uSrcSwirl + rad * uSrcPull) * f;
+        fall += f;
+      }
+      acc += -pos.xy * 0.15;                  // gentle framing pull to center
+      // vertical: rise near sources (bubble up), relax back toward the surface
+      float vz = uUpdraft * fall - uSettle * pos.z;
+      vec3 target = vec3(acc, vz);
+      vel = mix(target, vel, uInertia);
+      gl_FragColor = vec4(vel, 1.0);
+      return;
+    }
 
     vec3 field = curlNoise(pos * uFieldScale + vec3(0.0, 0.0, uTime * uFieldSpeed));
     field *= uCurlStrength;
@@ -233,10 +289,13 @@ const particleVert = /* glsl */ `
   uniform float uSizeSpeed;
   uniform float uDpr;
   uniform float uTime;
+  uniform float uSurfaceDraw; // 1 = depth-fade (water surface), 0 = life envelope
+  uniform float uSurfaceBand; // half-thickness of the bright surface slab
   attribute vec2 ref;
   varying float vSpeed;
   varying float vLife;
   varying float vSeed;
+  varying float vSurf;        // surface proximity 0..1 (1 = right at the surface)
 
   ${HASH}
   ${VNOISE}
@@ -252,8 +311,16 @@ const particleVert = /* glsl */ `
     vec4 mv = modelViewMatrix * vec4(posLife.xyz, 1.0);
     gl_Position = projectionMatrix * mv;
 
-    // born small -> grow -> shrink toward death (matches alpha env in frag)
-    float env = smoothstep(0.0, 0.18, vLife) * smoothstep(1.0, 0.8, vLife);
+    // SURFACE mode: a particle is brightest at the surface plane (z≈0) and fades
+    // as it rises/sinks away — so it bubbles up into view and sinks back out,
+    // no hard birth/death pop. Otherwise use the legacy life envelope.
+    float surf = exp(-(posLife.z * posLife.z) / max(uSurfaceBand * uSurfaceBand, 1e-4));
+    vSurf = surf;
+    float env = mix(
+      smoothstep(0.0, 0.18, vLife) * smoothstep(1.0, 0.8, vLife),
+      surf,
+      uSurfaceDraw
+    );
     // per-particle Perlin breathing between uSizeMin and uSizeMax
     float ns = vnoise(uTime * uSizeSpeed + seed * 97.0);
     float sizePx = mix(uSizeMin, uSizeMax, ns) * env;
@@ -267,9 +334,11 @@ const particleFrag = /* glsl */ `
   varying float vSpeed;
   varying float vLife;
   varying float vSeed;
+  varying float vSurf;
   uniform float uIntensity;
   uniform float uColorPhase;
   uniform float uColorSpread;
+  uniform float uSurfaceDraw;
   uniform vec3 uPalA;
   uniform vec3 uPalB;
   uniform vec3 uPalC;
@@ -285,8 +354,12 @@ const particleFrag = /* glsl */ `
     vec2 pc = gl_PointCoord - 0.5;
     float d = length(pc);
     float alpha = smoothstep(0.5, 0.0, d);
-    // matches the size envelope in the vertex shader
-    float env = smoothstep(0.0, 0.18, vLife) * smoothstep(1.0, 0.8, vLife);
+    // brightness envelope: surface-depth fade (water) or life envelope (legacy)
+    float env = mix(
+      smoothstep(0.0, 0.18, vLife) * smoothstep(1.0, 0.8, vLife),
+      vSurf,
+      uSurfaceDraw
+    );
     // palette position: speed + per-particle offset + rotating global phase
     float t = 0.1 + clamp(vSpeed, 0.0, 1.6) * 0.35 + vSeed * uColorSpread + uColorPhase;
     vec3 col = palette(t);
@@ -690,7 +763,7 @@ export class Visualizer {
   private mix = 0;
   private mixDur = 1.2;
   // auto-choreography driver
-  private autoMode: "cycle" | "music" | "symmetry" | null = null;
+  private autoMode: "cycle" | "music" | "symmetry" | "surface" | null = null;
   private autoLabel = "";
   private autoTimer = 0; // cycle: time on current step
   private autoStep = 0; // cycle: index into AUTO_PROGRAM
@@ -708,6 +781,20 @@ export class Visualizer {
   private symPendingN = 2; // point count chosen at center for the next bloom
   private symPhase = 0; // accumulated whole-figure rotation (radians)
   private symSpin = 0; // accumulated regional spin (radians)
+
+  // surface (water) driver — symmetry lives in the force field; the display
+  // kaleido fold is OFF. Pose machine like the journey, but it drives the
+  // velocity-shader source ring instead of a UV fold.
+  private surfActive = false;
+  private surfFrom: SurfPose = { numPoints: 3, radius: 0, swirl: 1.2, pull: 0.5, falloff: 2.4 };
+  private surfTo: SurfPose = { numPoints: 3, radius: 0, swirl: 1.2, pull: 0.5, falloff: 2.4 };
+  private surfCur: SurfPose = { numPoints: 3, radius: 0, swirl: 1.2, pull: 0.5, falloff: 2.4 };
+  private surfT = 1;
+  private surfHold = 0;
+  private surfMoveDur = 5;
+  private surfAtBloom = false;
+  private surfPendingN = 3;
+  private surfRot = 0; // accumulated ring rotation (radians)
 
   // optional music reactivity
   private audioEl: HTMLAudioElement | null = null;
@@ -783,6 +870,17 @@ export class Visualizer {
       uFieldSpeed: { value: this.fieldSpeed },
       uInertia: { value: 0.86 },
       uCurlStrength: { value: 1.0 },
+      // surface (water) mode
+      uSurface: { value: 0 },
+      uSrcCount: { value: 3 },
+      uSrcRadius: { value: 0.0 },
+      uSrcRot: { value: 0.0 },
+      uSrcSwirl: { value: 1.4 },
+      uSrcPull: { value: 0.5 },
+      uSrcFalloff: { value: 2.2 },
+      uUpdraft: { value: 0.5 },
+      uSettle: { value: 0.8 },
+      uSwirlNoise: { value: 0.0 },
     });
 
     const err = this.gpu.init();
@@ -829,6 +927,8 @@ export class Visualizer {
         uIntensity: { value: this.intensity },
         uColorPhase: { value: 0 },
         uColorSpread: { value: 0.4 },
+        uSurfaceDraw: { value: 0 },
+        uSurfaceBand: { value: 0.7 },
         // palette uniform values ARE the cur* vectors, lerped in place each frame
         uPalA: { value: this.curA },
         uPalB: { value: this.curB },
@@ -936,6 +1036,7 @@ export class Visualizer {
       return;
     }
     this.autoMode = null;
+    this.setSurfaceMode(false); // leaving surface → restore legacy field + draw
     this.transitionTo(m, 1.2); // smooth manual switch
     this.emitKaleidoLabel();
   }
@@ -969,7 +1070,7 @@ export class Visualizer {
   }
 
   /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
-  private startAuto(kind: "cycle" | "music" | "symmetry", label: string) {
+  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
     this.autoTimer = 0;
@@ -977,6 +1078,27 @@ export class Visualizer {
     this.autoEnergy = 0;
     this.autoTier = 0;
     this.autoCooldown = 0;
+    // surface mode puts symmetry in the FORCE FIELD; turn off the display fold.
+    const surf = kind === "surface";
+    this.setSurfaceMode(surf);
+    if (surf) {
+      // no display fold (kind 0 passthrough); the velocity shader makes symmetry
+      this.modeB = null;
+      this.mix = 0;
+      this.displayMat.uniforms.uMix.value = 0;
+      this.modeA = km("surface", { kind: 0 });
+      this.fillMode(this.modeA, this.uAVals);
+      this.surfRot = 0;
+      this.surfFrom = this.surfCenterPose();
+      this.surfCur = { ...this.surfFrom };
+      this.surfTo = this.surfFrom;
+      this.surfAtBloom = false;
+      this.surfT = 1;
+      this.surfHold = 0;
+      this.updateSurface(0);
+      this.emitKaleidoLabel();
+      return;
+    }
     if (kind === "symmetry") {
       // one continuously-morphing kind-9 field driven by updateSymJourney();
       // no A/B crossfade needed (params animate every frame). Seed set A.
@@ -1108,10 +1230,103 @@ export class Visualizer {
     u[5] = cur.swirl;
   }
 
+  /** Toggle the water-surface simulation (symmetry in the force field). When on,
+   *  the display kaleido fold is bypassed and particles draw with a depth fade. */
+  private setSurfaceMode(on: boolean) {
+    this.surfActive = on;
+    this.velocityVar.material.uniforms.uSurface.value = on ? 1 : 0;
+    this.pointsMat.uniforms.uSurfaceDraw.value = on ? 1 : 0;
+  }
+
+  private surfCenterPose(numPoints = 3): SurfPose {
+    return { numPoints, radius: 0.0, swirl: 1.0, pull: 0.6, falloff: 2.6 };
+  }
+
+  /** Roll a fresh random water bloom: new source count, ring radius, swirl. */
+  private randomSurfBloom(): SurfPose {
+    const r = Math.random;
+    const N = SURF_POINT_COUNTS[Math.floor(r() * SURF_POINT_COUNTS.length)];
+    return {
+      numPoints: N,
+      radius: (N <= 3 ? 1.1 : N <= 5 ? 0.95 : 0.8) + r() * 0.4,
+      swirl: (0.8 + r() * 1.8) * (r() < 0.5 ? -1 : 1), // sometimes counter-swirl
+      pull: 0.35 + r() * 0.5,
+      falloff: 1.6 + r() * 1.8,
+    };
+  }
+
+  /** Water-surface journey: eases the source ring between CENTER (consolidated)
+   *  and a fresh random BLOOM, driving the velocity shader. The ring also slowly
+   *  rotates. N changes only at center (radius≈0) where sources coincide, so the
+   *  count change is a physical bubbling-in, never a snap. */
+  private updateSurface(dt: number) {
+    let e: number;
+    if (this.audioEl && this.flow && !this.audioEl.paused && !this.audioEl.ended) {
+      const s = this.flow.sample(this.audioEl.currentTime);
+      e = Math.min(1, s.loudness * 1.2 + s.bass * 0.2);
+    } else {
+      e = 0.5 + 0.5 * Math.sin(this.clock.elapsedTime * 0.06);
+    }
+    this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5));
+
+    const pace = 0.5 + this.autoEnergy * 0.8;
+    if (this.surfT < 1) {
+      this.surfT = Math.min(1, this.surfT + (dt / this.surfMoveDur) * pace);
+    } else {
+      this.surfHold -= dt;
+      if (this.surfHold <= 0) {
+        this.surfFrom = { ...this.surfCur };
+        if (this.surfAtBloom) {
+          this.surfPendingN = SURF_POINT_COUNTS[Math.floor(Math.random() * SURF_POINT_COUNTS.length)];
+          this.surfTo = this.surfCenterPose(this.surfPendingN);
+          this.surfMoveDur = 4 + Math.random() * 3;
+          this.surfHold = 3 + Math.random() * 5; // pause, consolidated at center
+          this.surfAtBloom = false;
+        } else {
+          const bloom = this.randomSurfBloom();
+          bloom.numPoints = this.surfPendingN || bloom.numPoints;
+          this.surfTo = bloom;
+          this.surfMoveDur = 5 + Math.random() * 4; // slow, graceful spread
+          this.surfHold = 5 + Math.random() * 6; // dwell in the bloom
+          this.surfAtBloom = true;
+        }
+        this.surfT = 0;
+      }
+    }
+
+    const t = this.surfT;
+    const m = t * t * (3 - 2 * t);
+    const L = (x: number, y: number) => x + (y - x) * m;
+    const f = this.surfFrom, g = this.surfTo;
+    const cur = this.surfCur;
+    // N is discrete: hold the bloom-leg's count so it only changes at radius≈0.
+    cur.numPoints = (this.surfAtBloom ? g : f).numPoints;
+    cur.radius = L(f.radius, g.radius);
+    cur.swirl = L(f.swirl, g.swirl);
+    cur.pull = L(f.pull, g.pull);
+    cur.falloff = L(f.falloff, g.falloff);
+
+    // slow ring rotation, scaled a touch by energy
+    this.surfRot += dt * (0.12 + this.autoEnergy * 0.18);
+
+    const u = this.velocityVar.material.uniforms;
+    u.uSrcCount.value = cur.numPoints;
+    u.uSrcRadius.value = cur.radius;
+    u.uSrcRot.value = this.surfRot;
+    u.uSrcSwirl.value = cur.swirl;
+    u.uSrcPull.value = cur.pull;
+    u.uSrcFalloff.value = cur.falloff;
+  }
+
   /** Advance whichever auto driver is active; may trigger a crossfade. */
   private updateAuto(dt: number) {
     if (!this.autoMode) return;
     this.autoCooldown = Math.max(0, this.autoCooldown - dt);
+
+    if (this.autoMode === "surface") {
+      this.updateSurface(dt);
+      return;
+    }
 
     if (this.autoMode === "symmetry") {
       this.updateSymJourney(dt);
@@ -1268,7 +1483,7 @@ export class Visualizer {
   start() {
     if (this.running) return;
     this.running = true;
-    // default to the headline auto·symmetry choreography
+    // default to the headline surface (water) mode
     this.setKaleido(0);
     // push current state so the HUD reflects it immediately
     this.emitKaleidoLabel();
