@@ -165,6 +165,9 @@ type DivPose = {
   // symCells (auto · split) extras: layout 0=grid/1=ring; nx/ny axis divisions
   // (grid) or ring point count (nx); seg = rosette fold per focal point
   layout: number; nx: number; ny: number; seg: number;
+  // v1 divide: bloomType 0=grid, 1=triangle/ring, 2=radial; radSeg = radial
+  // segment count; seam = rest seam strength (radial home rests partly folded)
+  bloomType: number; radSeg: number; seam: number;
 };
 
 // SURFACE (water) mode pose: N swirl SOURCES on a ring in the flow field. The
@@ -958,9 +961,13 @@ const displayFrag = /* glsl */ `
         float wc = cos(uA[11]), ws = sin(uA[11]);
         base = mat2(wc, -ws, ws, wc) * base;
         vec2 original = base; original.x /= aspect; original += 0.5;
-        vec2 folded = (uA[3] > 2.5)
-          ? triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1])
-          : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+        // bloom type: uA[8] → 0 grid, 1 triangle/ring, 2 RADIAL (true central
+        // radial kaleidoscope, N=uA[3] segments). Radial is the home look.
+        int bt = int(uA[8] + 0.5);
+        vec2 folded;
+        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
+        else if (bt == 1) folded = triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1]);
+        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
         uv = mix(original, folded, seam);
       }
       col = texture2D(tTrail, uv).rgb;
@@ -1120,9 +1127,9 @@ export class Visualizer {
   private symOldSeg = 6; // previous (A) regional fold
   private symStructMix = 1; // 0→1 crossfade of A(old)→B(new) structure (1 = settled)
   // divide-and-move journey driver (pure continuous, no crossfade)
-  private divFrom: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
-  private divTo: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
-  private divCur: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
+  private divFrom: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 , bloomType: 2, radSeg: 6, seam: 0 };
+  private divTo: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 , bloomType: 2, radSeg: 6, seam: 0 };
+  private divCur: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 , bloomType: 2, radSeg: 6, seam: 0 };
   private divT = 1;
   private divHold = 0;
   private divMoveDur = 4;
@@ -1132,6 +1139,7 @@ export class Visualizer {
   private divIsV2 = false;
   private divWorld = 0; // accumulated whole-screen rotation (v1)
   private divWorldDir = 1; // current whole-screen rotation direction (±1)
+  private divHomeSeg = 6; // radial-home fold count (kept stable across blooms)
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1502,7 +1510,7 @@ export class Visualizer {
       this.divSpin2 = 0;
       this.divWorld = 0;
       this.divWorldDir = Math.random() < 0.5 ? -1 : 1;
-      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 };
+      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 , bloomType: 2, radSeg: 6, seam: 0 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
       this.divAtBloom = false; // first update opens into a bloom
@@ -1699,38 +1707,62 @@ export class Visualizer {
     this.displayMat.uniforms.uMix.value = mix;
   }
 
-  /** Roll a fresh divide-and-move bloom (v1): grid (per-axis split + bisect/
-   *  trisect → 1,2,3,4,6,9) OR — ~30% — a soft-blended TRIANGLE/ring (3/5/6
-   *  points, seamless, orbiting). nx carries the triangle point count (0=grid). */
+  /** The HOME pose: a gentle central RADIAL kaleidoscope (the most compelling
+   *  symmetric look). The journey rests here between blooms — NOT on the bare
+   *  original (that's a rare treat, see updateDivide). Low-ish segment count,
+   *  partial seam so it reads as a soft radial, not a hard kaleidoscope. */
+  private radialHome(): DivPose {
+    const r = Math.random;
+    const N = [4, 6, 6, 8][Math.floor(r() * 4)];
+    return {
+      dx: 0, dy: 0, kx: 0, ky: 0,
+      spin: (0.03 + r() * 0.05) * (r() < 0.5 ? -1 : 1),
+      swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
+      bloomType: 2, radSeg: N, seam: 0.7,   // radial, rests partly folded
+    };
+  }
+
+  /** Roll a fresh divide bloom: GRID (per-axis split → 1,2,3,4,6,9), TRIANGLE/
+   *  ring (3/5/6 soft points), or RADIAL (higher-N central kaleido). All bloom
+   *  to full seam (1.0); the home they return to is a gentle radial. */
   private randomDivBloom(): DivPose {
     const r = Math.random;
-    if (r() < 0.3) {
-      // TRIANGLE / ring bloom (seamless soft points). nx = point count.
-      const N = [3, 3, 3, 5, 6][Math.floor(r() * 5)]; // triangle-weighted
+    const roll = r();
+    if (roll < 0.30) {
+      // RADIAL bloom — true central radial symmetry, higher fold count
+      const N = [5, 6, 8, 10, 12][Math.floor(r() * 5)];
       return {
-        dx: 0.22 + r() * 0.10,   // ring radius
-        dy: 0, kx: 0, ky: 0,
-        spin: (0.05 + r() * 0.16) * (r() < 0.5 ? -1 : 1),
-        swirl: 0.3 + r() * 1.6,
-        layout: 0, nx: N, ny: 1,
-        seg: 4.5 + r() * 4.0,    // blend sharpness (seamless softness)
+        dx: 0, dy: 0, kx: 0, ky: 0,
+        spin: (0.04 + r() * 0.10) * (r() < 0.5 ? -1 : 1),
+        swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
+        bloomType: 2, radSeg: N, seam: 1.0,
       };
     }
+    if (roll < 0.52) {
+      // TRIANGLE / ring bloom (seamless soft points). nx = point count.
+      const N = [3, 3, 3, 5, 6][Math.floor(r() * 5)];
+      return {
+        dx: 0.22 + r() * 0.10, dy: 0, kx: 0, ky: 0,
+        spin: (0.05 + r() * 0.16) * (r() < 0.5 ? -1 : 1),
+        swirl: 0.3 + r() * 1.6,
+        layout: 0, nx: N, ny: 1, seg: 4.5 + r() * 4.0,
+        bloomType: 1, radSeg: 6, seam: 1.0,
+      };
+    }
+    // GRID bloom (per-axis split + bisect/trisect)
     const splitX = r() < 0.85;
     const splitY = r() < 0.7;
     const kx = splitX && r() < 0.45 ? 1 : 0;
     const ky = splitY && r() < 0.45 ? 1 : 0;
-    // innerSeg (carried in `seg`): 1 = plain cell; 2..6 = per-cell kaleido fold
-    // for more diversified patterns. ~55% get an inner fold.
     const innerSeg = r() < 0.55 ? [2, 3, 4, 6][Math.floor(r() * 4)] : 1;
     return {
       dx: splitX ? 0.18 + r() * 0.16 : 0,
       dy: splitY ? 0.16 + r() * 0.16 : 0,
       kx, ky,
-      // more spin than before (was 0.03..0.13) → livelier cells
       spin: (0.06 + r() * 0.20) * (r() < 0.5 ? -1 : 1),
       swirl: 0.4 + r() * 2.2,
-      layout: 0, nx: 0, ny: 1, seg: innerSeg,  // nx=0 ⇒ grid
+      layout: 0, nx: 0, ny: 1, seg: innerSeg,
+      bloomType: 0, radSeg: 6, seam: 1.0,
     };
   }
 
@@ -1747,21 +1779,21 @@ export class Visualizer {
     if (ring) {
       const N = [3, 3, 5, 6, 8][Math.floor(r() * 5)];     // triangle-weighted
       const dx = 0.20 + r() * 0.10;
-      return { dx, dy: 0, kx: 0, ky: 0, spin, swirl, layout: 1, nx: N, ny: 1, seg };
+      return { dx, dy: 0, kx: 0, ky: 0, spin, swirl, layout: 1, nx: N, ny: 1, seg, bloomType: 0, radSeg: 6, seam: 1 };
     } else {
       // grid: nx,ny ∈ {1,2,3}; bias to give 2×2, 3×3, 2×3
       const nx = [2, 2, 3][Math.floor(r() * 3)];
       const ny = [2, 3, 3][Math.floor(r() * 3)];
       const dx = nx === 1 ? 0 : 0.17 + r() * 0.10;
       const dy = ny === 1 ? 0 : 0.16 + r() * 0.10;
-      return { dx, dy, kx: 0, ky: 0, spin, swirl, layout: 0, nx, ny, seg };
+      return { dx, dy, kx: 0, ky: 0, spin, swirl, layout: 0, nx, ny, seg, bloomType: 0, radSeg: 6, seam: 1 };
     }
   }
 
   /** Consolidated center pose for split mode (everything collapsed). */
   private splitCenterPose(carry: DivPose): DivPose {
     return { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.04, swirl: 0.4,
-             layout: carry.layout, nx: carry.nx, ny: carry.ny, seg: carry.seg };
+             layout: carry.layout, nx: carry.nx, ny: carry.ny, seg: carry.seg, bloomType: 0, radSeg: 6, seam: 1 };
   }
 
   /** Divide-and-move journey. Eases a DivPose between CENTER (all spreads 0, one
@@ -1786,18 +1818,27 @@ export class Visualizer {
       if (this.divHold <= 0) {
         this.divFrom = { ...this.divCur };
         if (this.divAtBloom) {
-          // collapse to center (spreads → 0). structure carries; the next bloom
-          // resets it while consolidated (invisible since dx=dy=0).
-          this.divTo = this.divIsV2
-            ? this.splitCenterPose(this.divCur)
-            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: this.divCur.nx, ny: 1, seg: this.divCur.seg };
+          // return to HOME: a gentle central radial (NOT the bare original).
+          // ~1 in 9 times, rest on the true original (seam 0) as a rare breath.
+          if (this.divIsV2) {
+            this.divTo = this.splitCenterPose(this.divCur);
+          } else {
+            const home = this.radialHome();
+            // keep the home's radial fold count stable across blooms (only ~25%
+            // re-roll) so the radSeg doesn't visibly jump at the partly-folded
+            // home; carry the last home radSeg otherwise.
+            if (Math.random() < 0.75 && this.divHomeSeg > 0) home.radSeg = this.divHomeSeg;
+            this.divHomeSeg = home.radSeg;
+            if (Math.random() < 0.11) home.seam = 0.0; // rare bare-original rest
+            this.divTo = home;
+          }
           this.divMoveDur = 3.5 + Math.random() * 2.5;
-          this.divHold = 2.5 + Math.random() * 4;
+          this.divHold = 3 + Math.random() * 4;
           this.divAtBloom = false;
         } else {
-          // at center: pick the next bloom (its structure takes effect now, at d=0)
+          // at home: pick the next bloom (its structure takes effect here, where
+          // seam is low and any structure looks alike → invisible swap)
           this.divTo = this.divIsV2 ? this.randomSplitBloom() : this.randomDivBloom();
-          // occasionally reverse the whole-screen rotation for variety
           if (Math.random() < 0.4) this.divWorldDir *= -1;
           this.divMoveDur = 4 + Math.random() * 3;
           this.divHold = 4 + Math.random() * 5;
@@ -1812,21 +1853,35 @@ export class Visualizer {
     const f = this.divFrom, g = this.divTo, cur = this.divCur;
     cur.dx = L(f.dx, g.dx); cur.dy = L(f.dy, g.dy);
     cur.spin = L(f.spin, g.spin); cur.swirl = L(f.swirl, g.swirl);
-    // discrete structure: snap to target. It only ever changes at the center
-    // retarget where seamStrength=0 (the original drawing), so the swap is
-    // invisible — no jagged structural jump.
-    cur.kx = g.kx; cur.ky = g.ky;
-    cur.layout = g.layout; cur.nx = g.nx; cur.ny = g.ny; cur.seg = g.seg;
+    if (this.divIsV2) {
+      // v2 (split/symCells): snap structure to target (consolidates via dx→0)
+      cur.kx = g.kx; cur.ky = g.ky;
+      cur.layout = g.layout; cur.nx = g.nx; cur.ny = g.ny; cur.seg = g.seg;
+    } else {
+      // v1: SEAM dips through 0 at the MIDPOINT of every transition — first half
+      // collapses the current fold (fromSeam→0), second half emerges the target
+      // (0→toSeam). Structure swaps exactly at the seam=0 crossing (t=0.5), where
+      // any fold looks like the seamless original → invisible, no jagged jump.
+      if (t < 0.5) {
+        const h = t / 0.5, hm = h * h * (3 - 2 * h);
+        cur.seam = f.seam * (1 - hm);
+      } else {
+        const h = (t - 0.5) / 0.5, hm = h * h * (3 - 2 * h);
+        cur.seam = g.seam * hm;
+        cur.kx = g.kx; cur.ky = g.ky;
+        cur.nx = g.nx; cur.seg = g.seg;
+        cur.bloomType = g.bloomType; cur.radSeg = g.radSeg;
+      }
+    }
     this.divSpin += dt * cur.spin * TAU;        // ONE shared spin phase (coherent)
-    // SEAM STRENGTH: toward a bloom seams EMERGE (0→1); toward center they
-    // COLLAPSE into the original (1→0). Held at 0 during the center dwell = the
-    // seamless original drawing, where the next structure is chosen.
-    const seamStrength = this.divAtBloom ? m : (1 - m);
-    // (3) whole-screen rotation: a slow base turn, BOOSTED while a transition is
-    // in flight (divT in (0,1)) so the whole composition swings through the
-    // divide/merge. transFlux peaks mid-transition (sin curve), 0 when settled.
+    // (3) WHOLE-SCREEN ROTATION with AXIS DWELL: rotate more, but slow down (dwell)
+    // when seams are axis-aligned (worldRot near a multiple of 90°), where the
+    // composition looks strongest. axisGate → ~0 at 0/90/180/270°, 1 between.
+    const a4 = this.divWorld * 2.0;                 // period 90° in worldRot
+    const axisGate = (1.0 - Math.cos(a4 * 2.0)) * 0.5; // 0 at axis, 1 mid
     const transFlux = (this.divT > 0 && this.divT < 1) ? Math.sin(this.divT * Math.PI) : 0;
-    this.divWorld += dt * (0.05 + transFlux * 0.5 + this.autoEnergy * 0.08) * this.divWorldDir;
+    const rotRate = (0.04 + transFlux * 0.6 + this.autoEnergy * 0.10) * (0.12 + 0.88 * axisGate);
+    this.divWorld += dt * rotRate * this.divWorldDir;
 
     const u = this.uAVals;
     u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
@@ -1838,11 +1893,13 @@ export class Visualizer {
       u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
     } else {
       // v1 slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4, swirl=7,
-      // innerSeg/sharp=1, triCount=3 (0 ⇒ grid; ≥3 ⇒ triangle/ring),
-      // seamStrength=2 (0 ⇒ original drawing, no seams; 1 ⇒ full fold)
+      // innerSeg/sharp=1, count=3 (triangle pts OR radial segs by bloomType),
+      // seam=2, bloomType=8 (0 grid, 1 triangle, 2 radial)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
       u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl;
-      u[1] = cur.seg; u[3] = cur.nx; u[2] = seamStrength;
+      u[1] = cur.seg; u[2] = cur.seam; u[8] = cur.bloomType;
+      // uA[3] = count: radial segs (radial), triangle points (triangle), else 0
+      u[3] = cur.bloomType > 1.5 ? cur.radSeg : (cur.bloomType > 0.5 ? cur.nx : 0);
     }
   }
 
