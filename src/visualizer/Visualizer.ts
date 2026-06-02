@@ -1532,7 +1532,7 @@ export class Visualizer {
       this.divSpin2 = 0;
       this.divWorld = 0;
       this.divWorldDir = Math.random() < 0.5 ? -1 : 1;
-      this.divBaseSeg = [6, 8, 8, 12][Math.floor(Math.random() * 4)];
+      this.divBaseSeg = [4, 5, 6, 6, 8][Math.floor(Math.random() * 5)];
       this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 , bloomType: 2, radSeg: 6, seam: 0 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
@@ -1789,24 +1789,30 @@ export class Visualizer {
     };
   }
 
-  /** Roll a fresh bloom for auto · radial. RADIAL-DOMINANT and strictly
-   *  symmetric — no soft triangles (those read distorted), no asymmetric grids.
-   *  ~70% radial (with lively spin), ~30% a clean axis-aligned grid/quad whose
-   *  seams stay horizontal/vertical (worldRot is forced to 0 for grids in the
-   *  shader). Grids always split BOTH axes (balanced 2×2 / quad / 3×3). */
+  /** Roll a fresh bloom for auto · radial. The point is VARIETY of DESIGN, not a
+   *  spinning circle — so blooms favor visually DISTINCT shapes: low-count
+   *  radials (triangle/square/pentagon/hexagon, which look very different) and
+   *  clean axis-aligned grids/quads. Spin is LOW (occasional, not constant — the
+   *  evolution comes from the morphing transitions, not from spinning). All
+   *  strictly symmetric; grid seams stay H/V (shader passes worldRot=0). */
   private randomRadialBloom(): DivPose {
     const r = Math.random;
-    if (r() < 0.7) {
-      // RADIAL bloom — true central radial, higher fold, MORE spin
-      const N = [5, 6, 8, 8, 10, 12, 16][Math.floor(r() * 7)];
+    // low, often near-zero spin so it doesn't get dizzying; occasionally livelier
+    const spin = (r() < 0.5 ? 0.0 : 0.02 + r() * 0.06) * (r() < 0.5 ? -1 : 1);
+    const roll = r();
+    if (roll < 0.5) {
+      // RADIAL design — LOW counts that read as DISTINCT shapes (3 triangle,
+      // 4 square, 5 pentagon, 6 hexagon, 8 octagon). Avoid high counts (all look
+      // like the same circle).
+      const N = [3, 3, 4, 4, 5, 6, 6, 8][Math.floor(r() * 8)];
       return {
         dx: 0, dy: 0, kx: 0, ky: 0,
-        spin: (0.10 + r() * 0.18) * (r() < 0.5 ? -1 : 1), // livelier radial spin
-        swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
+        spin, swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
         bloomType: 2, radSeg: N, seam: 1.0,
       };
     }
-    // CLEAN GRID/QUAD — both axes split (balanced), bisect or trisect per axis
+    // CLEAN GRID / QUAD / SPLIT — both axes split (balanced), seams H/V.
+    // kx/ky pick 2 vs 3 divisions per axis → 2×2, 2×3, 3×3 etc.
     const kx = r() < 0.4 ? 1 : 0;
     const ky = r() < 0.4 ? 1 : 0;
     const innerSeg = r() < 0.5 ? [2, 4, 6][Math.floor(r() * 3)] : 1;
@@ -1814,8 +1820,7 @@ export class Visualizer {
       dx: 0.18 + r() * 0.14,
       dy: 0.18 + r() * 0.14,
       kx, ky,
-      spin: (0.05 + r() * 0.12) * (r() < 0.5 ? -1 : 1),
-      swirl: 0.3 + r() * 1.2,
+      spin, swirl: 0.3 + r() * 1.0,
       layout: 0, nx: 0, ny: 1, seg: innerSeg,
       bloomType: 0, radSeg: 6, seam: 1.0,
     };
@@ -1879,8 +1884,8 @@ export class Visualizer {
             // auto · radial: HOME = pure clean radial base (seam 0, bloom hidden).
             // Re-roll the base radial fold count NOW (during the bloom, seam high,
             // base hidden) so the home seg change is invisible; carry otherwise.
-            if (Math.random() < 0.4) this.divBaseSeg = [6, 8, 8, 10, 12][Math.floor(Math.random() * 5)];
-            this.divTo = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.03, swirl: 0.4, layout: 0, nx: 0, ny: 1, seg: 1, bloomType: 2, radSeg: this.divCur.radSeg, seam: 0 };
+            if (Math.random() < 0.5) this.divBaseSeg = [4, 5, 6, 6, 8][Math.floor(Math.random() * 5)];
+            this.divTo = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.02, swirl: 0.4, layout: 0, nx: 0, ny: 1, seg: 1, bloomType: 2, radSeg: this.divCur.radSeg, seam: 0 };
           } else {
             const home = this.radialHome();
             if (Math.random() < 0.75 && this.divHomeSeg > 0) home.radSeg = this.divHomeSeg;
@@ -1935,10 +1940,16 @@ export class Visualizer {
     // (3) WHOLE-SCREEN ROTATION with AXIS DWELL: rotate more, but slow down (dwell)
     // when seams are axis-aligned (worldRot near a multiple of 90°), where the
     // composition looks strongest. axisGate → ~0 at 0/90/180/270°, 1 between.
-    const a4 = this.divWorld * 2.0;                 // period 90° in worldRot
+    // The "turning the kaleidoscope" feel lives HERE: rotation is strong DURING
+    // transitions (transFlux) and nearly stops at rest (low base) — so the
+    // design evolves/turns as it morphs, rather than a constant dizzying spin.
+    // axisGate slows it further as seams approach axis-aligned (H/V dwell).
+    const a4 = this.divWorld * 2.0;
     const axisGate = (1.0 - Math.cos(a4 * 2.0)) * 0.5; // 0 at axis, 1 mid
     const transFlux = (this.divT > 0 && this.divT < 1) ? Math.sin(this.divT * Math.PI) : 0;
-    const rotRate = (0.04 + transFlux * 0.6 + this.autoEnergy * 0.10) * (0.12 + 0.88 * axisGate);
+    const baseRate = 0.012 + this.autoEnergy * 0.04;  // gentle idle drift
+    const turnRate = transFlux * 0.9;                  // strong turn while morphing
+    const rotRate = (baseRate + turnRate) * (0.18 + 0.82 * axisGate);
     this.divWorld += dt * rotRate * this.divWorldDir;
 
     const u = this.uAVals;
@@ -1954,10 +1965,9 @@ export class Visualizer {
       // innerSeg/sharp=1, count=3 (triangle pts OR radial segs by bloomType),
       // seam=2, bloomType=8 (0 grid, 1 triangle, 2 radial)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-      // radial mode: drive the radial rotation by worldRot + the (livelier) spin
-      // phase, so the radial base/blooms visibly rotate more. Grid blooms ignore
-      // this (shader passes 0) so their seams stay axis-aligned.
-      u[11] = this.divIsRadial ? (this.divWorld + this.divSpin) : this.divWorld;
+      // radial rotation = worldRot ONLY (transition-driven turn + gentle idle +
+      // axis-dwell). No constant divSpin added — that was the dizzying spin.
+      u[11] = this.divWorld;
       u[4] = this.divSpin; u[7] = cur.swirl;
       u[1] = cur.seg; u[2] = cur.seam; u[8] = cur.bloomType;
       // uA[3] = count: radial segs (radial), triangle points (triangle), else 0
