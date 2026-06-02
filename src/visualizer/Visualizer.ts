@@ -32,13 +32,14 @@ type KaleidoMode = {
   centerPull: number; // orbital: gravity/weight of the center anchor (0 = none)
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
-  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel"; // special: auto-choreography driver (no own geometry)
+  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 const KALEIDO_MODES: KaleidoMode[] = [
   // ── auto-choreography leads: these are the headline modes; symmetry is default ──
   { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
+  { name: "auto · divide", kind: -1, ...K0, auto: "divide" },
   { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
   { name: "auto · music", kind: -1, ...K0, auto: "music" },
   { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
@@ -150,6 +151,17 @@ type SymPose = {
 // Covers the family the user wants: 2/4/8 splits, 3 triangle, 9, plus 5/6/12/16
 // for surprise. Weighted (repeats) toward the headline counts.
 const SYM_POINT_COUNTS = [2, 3, 3, 4, 4, 5, 6, 8, 8, 9, 9, 12, 16];
+
+// DIVIDE-AND-MOVE pose (auto · divide). Per-axis split spread (dx,dy) + per-axis
+// bisect(0)/trisect(1) mode (kx,ky). Grid count = (dx>0 ? (kx?3:2) : 1) ×
+// (dy>0 ? (ky?3:2) : 1). All continuous: at d=0 an axis is a single center;
+// growing d divides it and slides the parts apart. Mode flips (kx/ky) happen
+// only at d≈0 where bisect==trisect, so they're invisible.
+type DivPose = {
+  dx: number; dy: number;
+  kx: number; ky: number;
+  spin: number; swirl: number;
+};
 
 // SURFACE (water) mode pose: N swirl SOURCES on a ring in the flow field. The
 // field is the sum of N identical evenly-spaced sources, so it is exactly N-fold
@@ -411,6 +423,7 @@ const displayFrag = /* glsl */ `
   uniform float uMix;         // 0 = show set A, 1 = show set B (crossfade dissolve)
   uniform float uSeamSoft;    // 0 = hard mirror seams, 1 = strongly feathered seams
   uniform float uRotational;  // 0 = mirror fold (symMorph), 1 = rotational (rotMorph, no seam)
+  uniform float uDivide;      // 1 = divide-and-move fold (auto · divide), uses uA slots
   // Two full parameter sets so we can crossfade between any two presets.
   // Layout: 0 kind, 1 segments, 2 rings, 3 points, 4 bubbleRate, 5 driftAmt,
   // 6 driftSpeed, 7 rotSpeed, 8 segPerPoint, 9 blendSharp, 10 orbitRadius,
@@ -736,6 +749,46 @@ const displayFrag = /* glsl */ `
     return p + 0.5;
   }
 
+  // ── DIVIDE-AND-MOVE fold (auto · divide) ───────────────────────────────────
+  // A 1-D fold along one axis whose focal point(s) DIVIDE and slide apart as the
+  // spread d grows from 0, with no fade. Two modes, identical at d=0 (=abs, one
+  // center) so the mode can switch invisibly while consolidated:
+  //   bisect  → abs(abs(x) - d)        : 1 center splits into 2 sliding to ±d
+  //   trisect → keep center + a mirrored pair: 3 centers (one stays, two leave)
+  // We return the folded coordinate; the "kept center" of trisect is just the
+  // region nearest x=0, which abs() already leaves in place — so trisect is a
+  // SOFTER split that keeps the middle. We blend bisect to trisect with keep
+  // (0=bisect, 1=trisect). Both fold so the output = signed distance to the
+  // NEAREST center, which is 0 exactly at each center → that's where the mirror
+  // tiling places a focal point.
+  //   bisect  centers at {-d, +d}      → 2
+  //   trisect centers at {-d, 0, +d}   → 3 (keeps the middle)
+  // At d=0 every center coincides at 0 and both reduce to abs(x) → identical, so
+  // the bisect/trisect choice can flip invisibly while consolidated.
+  float fold1D(float x, float d, float keep) {
+    float a = abs(x);
+    float bisect = abs(a - d);                 // nearest of ±d
+    float trisect = min(a, abs(a - d));        // nearest of 0, ±d
+    return mix(bisect, trisect, keep);
+  }
+
+  // dx/dy = split spread per axis; kx/ky = bisect(0)→trisect(1) per axis; the
+  // count is (2 or 3 on x) × (1,2,3 on y). spin/swirl give each cell motion.
+  vec2 divideMove(vec2 uv, float aspect, float dx, float dy, float kx, float ky,
+                  float spinPhase, float swirl) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    float fx = fold1D(p.x, dx, kx);
+    float fy = fold1D(p.y, dy, ky);
+    vec2 q = vec2(fx, fy);
+    // gentle regional swirl/spin around each resulting cell origin for life
+    float rr = length(q);
+    float aa = atan(q.y, q.x) + spinPhase + swirl * rr;
+    q = rr * vec2(cos(aa), sin(aa));
+    q.x /= aspect;
+    return q + 0.5;
+  }
+
   // dispatch one parameter set to its kaleidoscope mapping
   vec2 mapK(vec2 uv, float aspect,
             float kind, float seg, float rings, float pts, float bubbleRate,
@@ -765,6 +818,21 @@ const displayFrag = /* glsl */ `
     float m = smoothstep(0.0, 1.0, uMix);
 
     vec3 col;
+    // DIVIDE-AND-MOVE: a single continuous fold (no crossfade, no fade) — the
+    // journey eases dx/dy/kx/ky so points divide and slide apart / merge back.
+    // uA slots: dx=uA[10], dy=uA[12], kx=uA[5], ky=uA[6], spinPhase=uA[4], swirl=uA[7]
+    if (uDivide > 0.5) {
+      vec2 uv = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[7]);
+      col = texture2D(tTrail, uv).rgb;
+      col *= uExposure;
+      col = col / (col + vec3(1.0));
+      float vigD = smoothstep(1.1, 0.25, length(vUv - 0.5));
+      col *= mix(0.55, 1.0, vigD);
+      col = pow(col, vec3(0.4545));
+      col = clamp((col - 0.5) * uContrast + 0.5, 0.0, 1.0);
+      gl_FragColor = vec4(col, 1.0);
+      return;
+    }
     bool bothMorph = int(uA[0] + 0.5) == 9 && int(uB[0] + 0.5) == 9;
     // NOTE: do NOT also gate on uMix here. When a fold-count crossfade begins,
     // uMix resets to 0 for one frame; if that frame fell through to the mapK
@@ -885,7 +953,7 @@ export class Visualizer {
   private mix = 0;
   private mixDur = 1.2;
   // auto-choreography driver
-  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | null = null;
+  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | null = null;
   private autoLabel = "";
   private autoTimer = 0; // cycle: time on current step
   private autoStep = 0; // cycle: index into AUTO_PROGRAM
@@ -911,6 +979,15 @@ export class Visualizer {
   private symOldN = 2; // previous (A) fold count being faded out
   private symOldSeg = 6; // previous (A) regional fold
   private symStructMix = 1; // 0→1 crossfade of A(old)→B(new) structure (1 = settled)
+  // divide-and-move journey driver (pure continuous, no crossfade)
+  private divFrom: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
+  private divTo: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
+  private divCur: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
+  private divT = 1;
+  private divHold = 0;
+  private divMoveDur = 4;
+  private divAtBloom = false;
+  private divSpin = 0; // accumulated regional spin
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1116,6 +1193,7 @@ export class Visualizer {
         uMix: { value: 0 },
         uSeamSoft: { value: 0.6 },
         uRotational: { value: 0 },
+        uDivide: { value: 0 },
         uA: { value: this.uAVals },
         uB: { value: this.uBVals },
       },
@@ -1201,6 +1279,8 @@ export class Visualizer {
     }
     this.autoMode = null;
     this.setSurfaceMode(false); // leaving surface → restore legacy field + draw
+    this.displayMat.uniforms.uDivide.value = 0; // leaving divide
+    this.displayMat.uniforms.uRotational.value = 0;
     this.transitionTo(m, 1.2); // smooth manual switch
     this.emitKaleidoLabel();
   }
@@ -1234,7 +1314,7 @@ export class Visualizer {
   }
 
   /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
-  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel", label: string) {
+  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
     this.autoTimer = 0;
@@ -1260,6 +1340,26 @@ export class Visualizer {
       this.surfT = 1;
       this.surfHold = 0;
       this.updateSurface(0);
+      this.emitKaleidoLabel();
+      return;
+    }
+    // divide-and-move: a single continuous fold, no crossfade. Seed set A.
+    this.displayMat.uniforms.uDivide.value = kind === "divide" ? 1 : 0;
+    if (kind === "divide") {
+      this.displayMat.uniforms.uRotational.value = 0;
+      this.modeB = null;
+      this.mix = 0;
+      this.displayMat.uniforms.uMix.value = 0;
+      this.modeA = km(label, { kind: 0 });
+      this.fillMode(this.modeA, this.uAVals);
+      this.divSpin = 0;
+      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4 };
+      this.divCur = { ...this.divFrom };
+      this.divTo = this.divFrom;
+      this.divAtBloom = false; // first update opens into a bloom
+      this.divT = 1;
+      this.divHold = 0;
+      this.updateDivide(0);
       this.emitKaleidoLabel();
       return;
     }
@@ -1450,6 +1550,80 @@ export class Visualizer {
     this.displayMat.uniforms.uMix.value = mix;
   }
 
+  /** Roll a fresh divide-and-move bloom: choose, per axis, whether it splits at
+   *  all and bisect vs trisect, plus spreads + motion. Gives 1/2/3 per axis →
+   *  counts 1,2,3,4,6,9 (and visually 8/16 via larger spreads feel). */
+  private randomDivBloom(): DivPose {
+    const r = Math.random;
+    // each axis: 0 = no split (single), else split with bisect/trisect
+    const splitX = r() < 0.85; // x almost always splits (so it's not just vertical)
+    const splitY = r() < 0.7;
+    const kx = splitX && r() < 0.45 ? 1 : 0; // trisect ~45% when splitting
+    const ky = splitY && r() < 0.45 ? 1 : 0;
+    return {
+      dx: splitX ? 0.18 + r() * 0.16 : 0,
+      dy: splitY ? 0.16 + r() * 0.16 : 0,
+      kx, ky,
+      spin: (0.03 + r() * 0.10) * (r() < 0.5 ? -1 : 1),
+      swirl: 0.4 + r() * 1.8,
+    };
+  }
+
+  /** Divide-and-move journey. Eases a DivPose between CENTER (all spreads 0, one
+   *  point) and random BLOOMs — points DIVIDE and slide apart on the way out,
+   *  MERGE inward on the way back. No fade, no crossfade: bisect/trisect are
+   *  identical at d=0 so the per-axis mode can switch invisibly at center. */
+  private updateDivide(dt: number) {
+    let e: number;
+    if (this.audioEl && this.flow && !this.audioEl.paused && !this.audioEl.ended) {
+      const s = this.flow.sample(this.audioEl.currentTime);
+      e = Math.min(1, s.loudness * 1.2 + s.bass * 0.2);
+    } else {
+      e = 0.5 + 0.5 * Math.sin(this.clock.elapsedTime * 0.06);
+    }
+    this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5));
+
+    const pace = 0.5 + this.autoEnergy * 0.8;
+    if (this.divT < 1) {
+      this.divT = Math.min(1, this.divT + (dt / this.divMoveDur) * pace);
+    } else {
+      this.divHold -= dt;
+      if (this.divHold <= 0) {
+        this.divFrom = { ...this.divCur };
+        if (this.divAtBloom) {
+          // collapse back to center (all spreads → 0). kx/ky carry over; they’ll
+          // be reset by the next bloom while consolidated (invisible).
+          this.divTo = { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4 };
+          this.divMoveDur = 3.5 + Math.random() * 2.5;
+          this.divHold = 2.5 + Math.random() * 4;
+          this.divAtBloom = false;
+        } else {
+          // at center: pick the next bloom (its kx/ky take effect now, at d=0)
+          this.divTo = this.randomDivBloom();
+          this.divMoveDur = 4 + Math.random() * 3;
+          this.divHold = 4 + Math.random() * 5;
+          this.divAtBloom = true;
+        }
+        this.divT = 0;
+      }
+    }
+
+    const t = this.divT, m = t * t * (3 - 2 * t);
+    const L = (x: number, y: number) => x + (y - x) * m;
+    const f = this.divFrom, g = this.divTo, cur = this.divCur;
+    cur.dx = L(f.dx, g.dx); cur.dy = L(f.dy, g.dy);
+    // kx/ky: snap to the target's value (only matters at d>0, and we only leave
+    // center INTO a bloom whose k is already set, so this is continuous in effect)
+    cur.kx = g.kx; cur.ky = g.ky;
+    cur.spin = L(f.spin, g.spin); cur.swirl = L(f.swirl, g.swirl);
+    this.divSpin += dt * cur.spin * TAU;
+
+    const u = this.uAVals;
+    u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
+    u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
+    u[4] = this.divSpin; u[7] = cur.swirl;
+  }
+
   /** Toggle the water-surface simulation (symmetry in the force field). When on,
    *  the display kaleido fold is bypassed and particles draw with a depth fade. */
   private setSurfaceMode(on: boolean) {
@@ -1550,6 +1724,11 @@ export class Visualizer {
 
     if (this.autoMode === "symmetry" || this.autoMode === "pinwheel") {
       this.updateSymJourney(dt);
+      return;
+    }
+
+    if (this.autoMode === "divide") {
+      this.updateDivide(dt);
       return;
     }
 
