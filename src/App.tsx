@@ -8,7 +8,6 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const vizRef = useRef<Visualizer | null>(null);
 
-  const [kaleido, setKaleido] = useState("off");
   const [palette, setPalette] = useState("");
   const [evolve, setEvolve] = useState(0);
   const [breathe, setBreathe] = useState({ rate: 0, peak: 0 });
@@ -27,7 +26,6 @@ export default function App() {
     if (!canvas) return;
     const viz = new Visualizer(canvas);
     vizRef.current = viz;
-    viz.onKaleidoChange = setKaleido;
     viz.onPaletteChange = setPalette;
     viz.onFieldSpeedChange = setEvolve;
     viz.onBreatheChange = (rate, peak) => setBreathe({ rate, peak });
@@ -92,22 +90,21 @@ export default function App() {
         onEnded={() => setPlaying(false)}
       />
 
-      <div className="panel">
-        <button onClick={() => loadAndPlay("/techno-01.mp3", "techno-01")}>
-          ▶ Techno sample
-        </button>
-        <button onClick={togglePlay} disabled={!track}>
-          {playing ? "⏸ Pause" : "▶ Play"}
-        </button>
-        <label className="file">
-          Load file…
-          <input type="file" accept="audio/*" onChange={onFile} hidden />
-        </label>
-      </div>
-
-      <div className="modemenu">
-        <div className="modegroup">
-          <div className="modegroup-label">mode</div>
+      {/* top bar: transport on the left, mode buttons on the right */}
+      <div className="topbar">
+        <div className="transport">
+          <button onClick={() => loadAndPlay("/techno-01.mp3", "techno-01")}>
+            ▶ Techno sample
+          </button>
+          <button onClick={togglePlay} disabled={!track}>
+            {playing ? "⏸ Pause" : "▶ Play"}
+          </button>
+          <label className="file">
+            Load file…
+            <input type="file" accept="audio/*" onChange={onFile} hidden />
+          </label>
+        </div>
+        <div className="modes">
           {modeNames.map((name) => (
             <button
               key={name}
@@ -120,22 +117,22 @@ export default function App() {
         </div>
       </div>
 
+      {/* info line: full-width across the bottom */}
       <div className="hud">
         {track ? (
           <>
-            <b>{track}</b> · {bpm ? `${bpm} BPM` : "—"} · {status} &nbsp;|&nbsp;{" "}
+            <b>{track}</b> · {bpm ? `${bpm} BPM` : "—"} · {status}
           </>
         ) : (
-          <>music-visualizer · no track loaded &nbsp;|&nbsp; </>
+          <>music-visualizer · no track loaded</>
         )}
-        <b>K</b> kaleido: {kaleido} &nbsp;|&nbsp;{" "}
-        <b>P</b> {palette} &nbsp;|&nbsp;{" "}
-        <b>[ ]</b> evolve: {evolve === 0 ? "frozen" : evolve.toFixed(3)} &nbsp;|&nbsp;{" "}
-        <b>, .</b> breathe: {breathe.rate.toFixed(2)} &nbsp;|&nbsp;{" "}
-        <b>- =</b> size: {breathe.peak.toFixed(0)}px
-        <br />
-        <b>s S</b> seam-soft: {seam.soft.toFixed(2)} &nbsp;|&nbsp;{" "}
-        <b>b B</b> trail-blur: {seam.blur.toFixed(1)}
+        &nbsp;·&nbsp; <b>{mode}</b> &nbsp;·&nbsp;{" "}
+        <b>P</b> {palette} &nbsp;·&nbsp;{" "}
+        <b>[ ]</b> evolve {evolve === 0 ? "frozen" : evolve.toFixed(3)} &nbsp;·&nbsp;{" "}
+        <b>, .</b> breathe {breathe.rate.toFixed(2)} &nbsp;·&nbsp;{" "}
+        <b>- =</b> size {breathe.peak.toFixed(0)}px &nbsp;·&nbsp;{" "}
+        <b>s S</b> seam {seam.soft.toFixed(2)} &nbsp;·&nbsp;{" "}
+        <b>b B</b> blur {seam.blur.toFixed(1)}
       </div>
     </>
   );

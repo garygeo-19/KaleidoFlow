@@ -1381,9 +1381,9 @@ export class Visualizer {
   };
 
   private onKey = (e: KeyboardEvent) => {
-    if (e.key === "k" || e.key === "K") {
-      this.setKaleido(this.kaleidoIndex + 1);
-    } else if (e.key === "p" || e.key === "P") {
+    // NOTE: mode is chosen ONLY via the menu buttons now — no key cycles it, so
+    // it never changes unexpectedly. (The old 'K' cycle was removed.)
+    if (e.key === "p" || e.key === "P") {
       this.paletteTimer = 0;
       this.setPalette(this.paletteIndex + 1);
     } else if (e.key === "]") {
