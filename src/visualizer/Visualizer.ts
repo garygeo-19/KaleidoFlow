@@ -2022,7 +2022,23 @@ export class Visualizer {
     const baseRate = 0.012 + this.autoEnergy * 0.04;  // gentle idle drift
     const turnRate = transFlux * 0.9;                  // strong turn while morphing
     const rotRate = (baseRate + turnRate) * (0.18 + 0.82 * axisGate);
-    this.divWorld += dt * rotRate * this.divWorldDir;
+    // SETTLE-SNAP: while a radial-mode bloom is at REST, OVERRIDE the idle drift
+    // and ease worldRot to the nearest LEFT-RIGHT-symmetric orientation so the
+    // pause is never tilted. An N-fold radial's mirror lines sit every π/N; one
+    // is vertical (→ L/R symmetric screen) at rot ≡ π/2 (mod π/N). During a
+    // transition we rotate freely (the turn); only snap when settled (divT≥1).
+    const settled = this.divIsRadial && this.divT >= 1;
+    if (settled) {
+      const N = cur.bloomType > 1.5 ? Math.max(2, cur.radSeg)   // radial: radSeg
+              : cur.bloomType > 0.5 ? 3                          // triangle p6m: π/3
+              : Math.max(2, this.divBaseSeg);                    // grid: radial base
+      const step = Math.PI / N;
+      const target = Math.round((this.divWorld - Math.PI / 2) / step) * step + Math.PI / 2;
+      // strong ease, NO idle drift while settling → it actually lands square
+      this.divWorld += (target - this.divWorld) * (1 - Math.exp(-dt * 3.0));
+    } else {
+      this.divWorld += dt * rotRate * this.divWorldDir;
+    }
     // gentle continuous orbit for the "centers circling each other" bloom (bt1)
     this.divOrbit += dt * (0.10 + this.autoEnergy * 0.08) * this.divWorldDir;
 
