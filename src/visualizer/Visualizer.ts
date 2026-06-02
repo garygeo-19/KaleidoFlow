@@ -777,17 +777,28 @@ const displayFrag = /* glsl */ `
   }
 
   // dx/dy = split spread per axis; kx/ky = bisect(0)→trisect(1) per axis; the
-  // count is (2 or 3 on x) × (1,2,3 on y). spin/swirl give each cell motion.
+  // count is (2 or 3 on x) × (1,2,3 on y). worldRot spins the WHOLE composition
+  // before folding; spin/swirl give each cell its own rotation/twist; innerSeg
+  // adds a per-cell radial kaleido fold for more diversified patterns.
   vec2 divideMove(vec2 uv, float aspect, float dx, float dy, float kx, float ky,
-                  float spinPhase, float swirl) {
+                  float worldRot, float spinPhase, float swirl, float innerSeg) {
     vec2 p = uv - 0.5;
     p.x *= aspect;
+    // (3) whole-screen rotation: rotate the entire field before the split fold,
+    // so the whole composition turns (strongest in transitions, driven below).
+    float wc = cos(worldRot), ws = sin(worldRot);
+    p = mat2(wc, -ws, ws, wc) * p;
     float fx = fold1D(p.x, dx, kx);
     float fy = fold1D(p.y, dy, ky);
     vec2 q = vec2(fx, fy);
-    // gentle regional swirl/spin around each resulting cell origin for life
+    // (1) per-cell spin + swirl around each cell origin
     float rr = length(q);
     float aa = atan(q.y, q.x) + spinPhase + swirl * rr;
+    // (2) inner kaleido fold per cell for diversified patterns (innerSeg≈1 → off)
+    if (innerSeg > 1.5) {
+      float seg_a = TAU / innerSeg;
+      aa = abs(mod(aa, seg_a) - seg_a * 0.5);
+    }
     q = rr * vec2(cos(aa), sin(aa));
     q.x /= aspect;
     return q + 0.5;
@@ -892,9 +903,11 @@ const displayFrag = /* glsl */ `
     //    spinning rosette). v2 slots: layout=uA[2], nAxisX=uA[5], nAxisY=uA[6],
     //    dx=uA[10], dy=uA[12], ringRot=uA[11], spinPhase=uA[4], swirl=uA[7], seg=uA[1]
     if (uDivide > 0.5) {
+      // v1 divide slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4,
+      //   swirl=7, innerSeg=1
       vec2 uv = uDivide > 1.5
         ? symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1])
-        : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[7]);
+        : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
       col = texture2D(tTrail, uv).rgb;
       col *= uExposure;
       col = col / (col + vec3(1.0));
@@ -1062,6 +1075,8 @@ export class Visualizer {
   private divSpin = 0; // accumulated regional spin (v1 + v2 primary)
   private divSpin2 = 0; // v2: second (often opposite) per-cell spin phase
   private divIsV2 = false;
+  private divWorld = 0; // accumulated whole-screen rotation (v1)
+  private divWorldDir = 1; // current whole-screen rotation direction (±1)
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1430,7 +1445,9 @@ export class Visualizer {
       this.fillMode(this.modeA, this.uAVals);
       this.divSpin = 0;
       this.divSpin2 = 0;
-      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 6 };
+      this.divWorld = 0;
+      this.divWorldDir = Math.random() < 0.5 ? -1 : 1;
+      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
       this.divAtBloom = false; // first update opens into a bloom
@@ -1635,13 +1652,17 @@ export class Visualizer {
     const splitY = r() < 0.7;
     const kx = splitX && r() < 0.45 ? 1 : 0;
     const ky = splitY && r() < 0.45 ? 1 : 0;
+    // innerSeg (carried in `seg`): 1 = plain cell; 2..6 = per-cell kaleido fold
+    // for more diversified patterns. ~55% get an inner fold.
+    const innerSeg = r() < 0.55 ? [2, 3, 4, 6][Math.floor(r() * 4)] : 1;
     return {
       dx: splitX ? 0.18 + r() * 0.16 : 0,
       dy: splitY ? 0.16 + r() * 0.16 : 0,
       kx, ky,
-      spin: (0.03 + r() * 0.10) * (r() < 0.5 ? -1 : 1),
-      swirl: 0.4 + r() * 1.8,
-      layout: 0, nx: 1, ny: 1, seg: 6,
+      // more spin than before (was 0.03..0.13) → livelier cells
+      spin: (0.06 + r() * 0.20) * (r() < 0.5 ? -1 : 1),
+      swirl: 0.4 + r() * 2.2,
+      layout: 0, nx: 1, ny: 1, seg: innerSeg,
     };
   }
 
@@ -1697,17 +1718,19 @@ export class Visualizer {
       if (this.divHold <= 0) {
         this.divFrom = { ...this.divCur };
         if (this.divAtBloom) {
-          // collapse to center (spreads → 0). layout/nx/ny/seg carry; the next
-          // bloom resets them while consolidated (invisible since dx=dy=0).
+          // collapse to center (spreads → 0). structure carries; the next bloom
+          // resets it while consolidated (invisible since dx=dy=0).
           this.divTo = this.divIsV2
             ? this.splitCenterPose(this.divCur)
-            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 6 };
+            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: this.divCur.seg };
           this.divMoveDur = 3.5 + Math.random() * 2.5;
           this.divHold = 2.5 + Math.random() * 4;
           this.divAtBloom = false;
         } else {
           // at center: pick the next bloom (its structure takes effect now, at d=0)
           this.divTo = this.divIsV2 ? this.randomSplitBloom() : this.randomDivBloom();
+          // occasionally reverse the whole-screen rotation for variety
+          if (Math.random() < 0.4) this.divWorldDir *= -1;
           this.divMoveDur = 4 + Math.random() * 3;
           this.divHold = 4 + Math.random() * 5;
           this.divAtBloom = true;
@@ -1725,6 +1748,11 @@ export class Visualizer {
     cur.kx = g.kx; cur.ky = g.ky;
     cur.layout = g.layout; cur.nx = g.nx; cur.ny = g.ny; cur.seg = g.seg;
     this.divSpin += dt * cur.spin * TAU;        // ONE shared spin phase (coherent)
+    // (3) whole-screen rotation: a slow base turn, BOOSTED while a transition is
+    // in flight (divT in (0,1)) so the whole composition swings through the
+    // divide/merge. transFlux peaks mid-transition (sin curve), 0 when settled.
+    const transFlux = (this.divT > 0 && this.divT < 1) ? Math.sin(this.divT * Math.PI) : 0;
+    this.divWorld += dt * (0.05 + transFlux * 0.5 + this.autoEnergy * 0.08) * this.divWorldDir;
 
     const u = this.uAVals;
     u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
@@ -1735,8 +1763,9 @@ export class Visualizer {
       u[10] = cur.dx; u[12] = cur.dy; u[11] = this.divSpin * 0.4; // ring orbits slower
       u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
     } else {
+      // v1 slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4, swirl=7, innerSeg=1
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-      u[4] = this.divSpin; u[7] = cur.swirl; u[1] = 6;
+      u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
     }
   }
 
@@ -2004,9 +2033,8 @@ export class Visualizer {
   start() {
     if (this.running) return;
     this.running = true;
-    // default to auto·symmetry (the strongest base). surface is kept at index 0
-    // for A/B comparison via the menu, but symmetry leads.
-    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · symmetry"));
+    // default to auto·divide (user's pick). other modes kept in the menu.
+    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · divide"));
     // push current state so the HUD reflects it immediately
     this.emitKaleidoLabel();
     this.onPaletteChange(PALETTES[this.paletteIndex].name);
