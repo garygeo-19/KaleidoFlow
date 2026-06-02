@@ -89,9 +89,10 @@ type SymPose = {
   localSeg: number;
 };
 // Allowed focal-point counts for blooms — even spacing guaranteed for any N.
-// Covers the family the user wants: 2/4/8 splits, 3 triangle, 9, plus 5/6/12/16
-// for surprise. Weighted (repeats) toward the headline counts.
-const SYM_POINT_COUNTS = [2, 3, 3, 4, 4, 5, 6, 8, 8, 9, 9, 12, 16];
+// FLOOR OF 4: counts of 2 (a single mirror line) and 3 read as a lopsided
+// "two-way split", not a kaleidoscope — so the lowest count is 4 (a clean
+// four-way split). Weighted (repeats) toward the headline counts 4/6/8.
+const SYM_POINT_COUNTS = [4, 4, 5, 6, 6, 8, 8, 9, 9, 12, 16];
 
 // DIVIDE-AND-MOVE pose (auto · divide). Per-axis split spread (dx,dy) + per-axis
 // bisect(0)/trisect(1) mode (kx,ky). Grid count = (dx>0 ? (kx?3:2) : 1) ×
@@ -1820,28 +1821,24 @@ export class Visualizer {
     // low, often near-zero spin so it doesn't get dizzying; occasionally livelier
     const spin = (r() < 0.5 ? 0.0 : 0.02 + r() * 0.06) * (r() < 0.5 ? -1 : 1);
     const roll = r();
-    if (roll < 0.42) {
-      // RADIAL design — LOW counts that read as DISTINCT shapes (3 triangle,
-      // 4 square, 5 pentagon, 6 hexagon, 8 octagon). Avoid high counts (all look
-      // like the same circle).
-      const N = [3, 3, 4, 4, 5, 6, 6, 8][Math.floor(r() * 8)];
+    if (roll < 0.62) {
+      // RADIAL design — counts that read as DISTINCT shapes (4 square,
+      // 5 pentagon, 6 hexagon, 8 octagon). FLOOR OF 4: a 2- or 3-fold radial
+      // reads as a lopsided single/double mirror, not a kaleidoscope. Avoid very
+      // high counts too (all look like the same circle).
+      const N = [4, 4, 5, 6, 6, 8][Math.floor(r() * 6)];
       return {
         dx: 0, dy: 0, kx: 0, ky: 0,
         spin, swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
         bloomType: 2, radSeg: N, seam: 1.0,
       };
     }
-    if (roll < 0.62) {
-      // TRIANGLE KALEIDOSCOPE — equilateral mirror fold; seams meet at the three
-      // vertices (each a 6-fold star), center stays clean. dx = scale (triangle
-      // size). orbits via worldRot+orbit in the driver.
-      return {
-        dx: 0.45 + r() * 0.35,           // triangle scale
-        dy: 0, kx: 0, ky: 0,
-        spin, swirl: 0, layout: 0, nx: 3, ny: 1, seg: 1,
-        bloomType: 1, radSeg: 6, seam: 1.0,
-      };
-    }
+    // NOTE: the equilateral TRIANGLE KALEIDOSCOPE (bloomType 1) was dropped from
+    // this mode. Its mirror lines meet at the triangle vertices, but the particle
+    // cloud is centrally concentrated and the centroid sits at screen center — so
+    // at any usable scale only the central horizontal mirror was visible and it
+    // degenerated to a "two-way split" (one mirror). The radial + grid blooms are
+    // reliably centered and stay >= four-way symmetric.
     // CLEAN GRID / QUAD / SPLIT — both axes split (balanced), seams H/V.
     // kx/ky pick 2 vs 3 divisions per axis → 2×2, 2×3, 3×3 etc.
     const kx = r() < 0.4 ? 1 : 0;

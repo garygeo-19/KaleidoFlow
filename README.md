@@ -65,9 +65,9 @@ their own and react to the music.
 
 | Mode | What it is |
 |------|------------|
-| **evolving symmetry** *(default)* | Clean radial home that turns/morphs into low-count radials (triangle, square, pentagon, hexagon…), an equilateral **triangle kaleidoscope** (seams at the vertices), and axis-aligned **grids/quads**. The headline mode. |
+| **evolving symmetry** *(default)* | Clean radial home that turns/morphs into radials (square, pentagon, hexagon, octagon…) and axis-aligned **grids/quads** — always at least a **four-way split**, never a lopsided single mirror. The headline mode. |
 | **evolving surface** | Symmetry lives in the **force field** (N evenly-spaced swirl sources) rather than a post fold — a "water surface" where particles bubble up and sink. |
-| **evolving morph** | A continuous N-fold dihedral morph journey (the original symmetry engine), exploring point counts 2–16. |
+| **evolving morph** | A continuous N-fold dihedral morph journey (the original symmetry engine), exploring point counts 4–16. |
 | **evolving pinwheel** | Rotational (cyclic) symmetry with **no mirror seams** — reads more like a spiral/pinwheel. |
 
 ## Controls
