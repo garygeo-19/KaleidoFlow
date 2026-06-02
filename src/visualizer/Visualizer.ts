@@ -987,9 +987,12 @@ const displayFrag = /* glsl */ `
         int bt = int(uA[8] + 0.5);
         vec2 folded;
         if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
-        // bt 1 = N RADIAL CENTERS orbiting each other (e.g. 3): nPts=uA[3],
-        //   ring radius=uA[10], orbit=uA[11], per-center fold=uA[1], sharp=uA[7]
-        else if (bt == 1) folded = orbitCenters(vUv, aspect, uA[3], uA[10], uA[11], uA[1], uA[4], uA[7]);
+        // bt 1 = N-fold MORPH (the auto·symmetry triangle): N=uA[3] mirror-
+        //   symmetric lobes (each mirrored down its own centerline — GUARANTEED
+        //   symmetric, no lopsided blobs), a radial focal point at focusR=uA[10]
+        //   on each lobe, the whole figure orbiting via globalPhase=uA[11].
+        //   spin=uA[4], swirl=uA[7], per-lobe fold=uA[1].
+        else if (bt == 1) { float w; folded = symMorph(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1], w); }
         // GRID bloom: pass worldRot=0 so the fold seams stay axis-aligned
         // (horizontal/vertical), never diagonal. The whole-field swing still
         // lives in the radial base + spin; the grid itself stays square.
@@ -1843,15 +1846,15 @@ export class Visualizer {
       };
     }
     if (roll < 0.62) {
-      // N RADIAL CENTERS ORBITING each other (mostly 3 — three radial nodes
-      // circling). nx=count, dx=ring radius, seg=per-center fold, swirl=blend
-      // sharpness (high = tight/crisp). The ring orbits via worldRot in the
-      // driver (an actual orbit term), so the centers rotate around each other.
+      // N-fold MORPH lobes (mostly 3 = the symmetric triangle). symMorph:
+      // nx=N lobes, dx=focusR (radial focal point distance on each lobe),
+      // seg=per-lobe radial fold, swirl=gentle radius twist. The whole figure
+      // orbits via worldRot+orbit in the driver — guaranteed mirror-symmetric.
       const N = [3, 3, 3, 4, 5][Math.floor(r() * 5)];
       return {
-        dx: 0.26 + r() * 0.06,           // ring radius (well separated)
+        dx: 0.20 + r() * 0.10,           // focusR — focal point out on each lobe
         dy: 0, kx: 0, ky: 0,
-        spin, swirl: 7.0 + r() * 3.0,    // high sharp → crisp, separated centers
+        spin, swirl: 0.4 + r() * 1.2,    // gentle twist (NOT the old blend-sharp)
         layout: 0, nx: N, ny: 1, seg: [4, 6, 6, 8][Math.floor(r() * 4)],
         bloomType: 1, radSeg: 6, seam: 1.0,
       };
