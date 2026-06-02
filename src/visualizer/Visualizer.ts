@@ -146,9 +146,10 @@ type SymPose = {
   circle: number;
   localSeg: number;
 };
-// Allowed point counts for blooms — even spacing guaranteed for any N; 3 gives a
-// triangle. Weighted toward the prettier low counts but reaching up to 16.
-const SYM_POINT_COUNTS = [2, 3, 4, 4, 6, 8, 16];
+// Allowed focal-point counts for blooms — even spacing guaranteed for any N.
+// Covers the family the user wants: 2/4/8 splits, 3 triangle, 9, plus 5/6/12/16
+// for surprise. Weighted (repeats) toward the headline counts.
+const SYM_POINT_COUNTS = [2, 3, 3, 4, 4, 5, 6, 8, 8, 9, 9, 12, 16];
 
 // SURFACE (water) mode pose: N swirl SOURCES on a ring in the flow field. The
 // field is the sum of N identical evenly-spaced sources, so it is exactly N-fold
@@ -1301,23 +1302,46 @@ export class Visualizer {
     return { numPoints, focusR: 0.0, spin: 0.04, swirl: 0.5, circle: 0.0, localSeg: 6 };
   }
 
-  /** Roll a fresh random bloom pose — new N (incl. 3=triangle, up to 16),
-   *  radius, spin direction, swirl, regional fold, and rotation. Never repeats. */
+  /** Roll a fresh random bloom pose. Picks a distinct ARCHETYPE each time so
+   *  blooms feel genuinely different (a tight grid vs a wide slow drift vs a fast
+   *  ornate pinwheel) rather than variations on one look — combined with the wide
+   *  point-count set it rarely repeats. All smooth: N/localSeg only ever swap at
+   *  the consolidated center, the rest are continuously eased. */
   private randomBloom(): SymPose {
     const rnd = Math.random;
     const N = SYM_POINT_COUNTS[Math.floor(rnd() * SYM_POINT_COUNTS.length)];
-    // higher N looks better a little tighter so the ring doesn't overlap itself
-    const focusR = (N <= 3 ? 0.26 : N <= 6 ? 0.23 : 0.20) + rnd() * 0.06;
-    const dir = rnd() < 0.5 ? -1 : 1; // sometimes rotate the other way
-    return {
-      numPoints: N,
-      focusR,
-      spin: (0.05 + rnd() * 0.12) * (rnd() < 0.5 ? -1 : 1),
-      swirl: 0.8 + rnd() * 2.8,
-      circle: dir * (0.02 + rnd() * 0.09),
-      // regional fold per focal point: sometimes simple mirror, sometimes ornate
-      localSeg: [2, 3, 4, 5, 6, 8][Math.floor(rnd() * 6)],
-    };
+    const dir = rnd() < 0.5 ? -1 : 1;
+    // base ring radius — higher N sits a bit tighter so points don't overlap
+    const baseR = N <= 3 ? 0.27 : N <= 6 ? 0.23 : N <= 9 ? 0.20 : 0.17;
+
+    // 5 archetypes, each with its own motion + regional-fold character
+    const arche = Math.floor(rnd() * 5);
+    let focusR = baseR, spin = 0.08, swirl = 1.5, circle = 0.05, localSeg = 4;
+    if (arche === 0) {
+      // GRID / still — crisp, low motion, simple regional mirror
+      focusR = baseR * (0.9 + rnd() * 0.2);
+      spin = 0.02 + rnd() * 0.04; swirl = 0.4 + rnd() * 0.8;
+      circle = dir * (0.01 + rnd() * 0.03); localSeg = [2, 4][Math.floor(rnd() * 2)];
+    } else if (arche === 1) {
+      // PINWHEEL — fast spin + strong circle, energetic
+      spin = (0.14 + rnd() * 0.18) * dir; swirl = 1.5 + rnd() * 2.0;
+      circle = dir * (0.08 + rnd() * 0.10); localSeg = [3, 4, 6][Math.floor(rnd() * 3)];
+    } else if (arche === 2) {
+      // ROSETTE — wide, ornate regional fold, gentle
+      focusR = baseR * (1.05 + rnd() * 0.25);
+      spin = 0.03 + rnd() * 0.06; swirl = 2.0 + rnd() * 2.5;
+      circle = dir * (0.02 + rnd() * 0.05); localSeg = [6, 8, 10][Math.floor(rnd() * 3)];
+    } else if (arche === 3) {
+      // DRIFT — slow, big, hypnotic
+      focusR = baseR * (1.0 + rnd() * 0.3);
+      spin = (0.02 + rnd() * 0.05) * dir; swirl = 0.8 + rnd() * 1.4;
+      circle = dir * (0.03 + rnd() * 0.05); localSeg = [3, 4, 5][Math.floor(rnd() * 3)];
+    } else {
+      // SWIRL — moderate everything, twisty arms
+      spin = (0.06 + rnd() * 0.10) * dir; swirl = 2.4 + rnd() * 2.2;
+      circle = dir * (0.04 + rnd() * 0.08); localSeg = [4, 5, 6][Math.floor(rnd() * 3)];
+    }
+    return { numPoints: N, focusR, spin, swirl, circle, localSeg };
   }
 
   /** Generative symmetry journey. Eases the current pose toward a target; on
