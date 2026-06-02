@@ -856,6 +856,33 @@ const displayFrag = /* glsl */ `
     return c + r * vec2(cos(a), sin(a));
   }
 
+  // N RADIAL CENTERS orbiting each other: nPts true radial rosettes evenly on a
+  // ring of radius rad, the ring rotating by orbit (so the centers circle each
+  // other). Each center is the SAME segPerPoint-fold rosette (shared spin) → all
+  // identical = coherent/symmetric. Tight blend (high sharp) keeps the centers
+  // crisp and well-separated, not smeared. rad=0 ⇒ they coincide (one center).
+  vec2 orbitCenters(vec2 uv, float aspect, float nPts, float rad, float orbit,
+                    float segPerPoint, float spinPhase, float sharp) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    vec2 acc = vec2(0.0);
+    float wsum = 0.0;
+    for (int k = 0; k < 9; k++) {
+      if (float(k) >= nPts) break;
+      float ang = orbit + TAU * float(k) / nPts + PI * 0.5; // +90° → one points up
+      vec2 c = rad * vec2(cos(ang), sin(ang));
+      float d = length(p - c);
+      float w = exp(-d * sharp);                 // tight, well-separated centers
+      vec2 folded = rosette(p, c, segPerPoint, spinPhase, 0.0); // true radial fold
+      acc += folded * w;
+      wsum += w;
+    }
+    if (wsum < 1e-4) return uv;
+    vec2 q = acc / wsum;
+    q.x /= aspect;
+    return q + 0.5;
+  }
+
   // SYM CELLS — generalizes symSplit to 2/3/4/9 + orbital rings, ALL exact
   // mirror-symmetric copies (each focal point is the SAME spinning rosette), so
   // the frame stays coherent (no per-cell fragmentation). Two layouts:
@@ -960,6 +987,9 @@ const displayFrag = /* glsl */ `
         int bt = int(uA[8] + 0.5);
         vec2 folded;
         if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
+        // bt 1 = N RADIAL CENTERS orbiting each other (e.g. 3): nPts=uA[3],
+        //   ring radius=uA[10], orbit=uA[11], per-center fold=uA[1], sharp=uA[7]
+        else if (bt == 1) folded = orbitCenters(vUv, aspect, uA[3], uA[10], uA[11], uA[1], uA[4], uA[7]);
         // GRID bloom: pass worldRot=0 so the fold seams stay axis-aligned
         // (horizontal/vertical), never diagonal. The whole-field swing still
         // lives in the radial base + spin; the grid itself stays square.
@@ -1160,6 +1190,7 @@ export class Visualizer {
   private divWorld = 0; // accumulated whole-screen rotation (v1)
   private divWorldDir = 1; // current whole-screen rotation direction (±1)
   private divHomeSeg = 6; // radial-home fold count (kept stable across blooms)
+  private divOrbit = 0; // accumulated orbit for the centers-circling bloom
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1800,7 +1831,7 @@ export class Visualizer {
     // low, often near-zero spin so it doesn't get dizzying; occasionally livelier
     const spin = (r() < 0.5 ? 0.0 : 0.02 + r() * 0.06) * (r() < 0.5 ? -1 : 1);
     const roll = r();
-    if (roll < 0.5) {
+    if (roll < 0.42) {
       // RADIAL design — LOW counts that read as DISTINCT shapes (3 triangle,
       // 4 square, 5 pentagon, 6 hexagon, 8 octagon). Avoid high counts (all look
       // like the same circle).
@@ -1809,6 +1840,20 @@ export class Visualizer {
         dx: 0, dy: 0, kx: 0, ky: 0,
         spin, swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
         bloomType: 2, radSeg: N, seam: 1.0,
+      };
+    }
+    if (roll < 0.62) {
+      // N RADIAL CENTERS ORBITING each other (mostly 3 — three radial nodes
+      // circling). nx=count, dx=ring radius, seg=per-center fold, swirl=blend
+      // sharpness (high = tight/crisp). The ring orbits via worldRot in the
+      // driver (an actual orbit term), so the centers rotate around each other.
+      const N = [3, 3, 3, 4, 5][Math.floor(r() * 5)];
+      return {
+        dx: 0.26 + r() * 0.06,           // ring radius (well separated)
+        dy: 0, kx: 0, ky: 0,
+        spin, swirl: 7.0 + r() * 3.0,    // high sharp → crisp, separated centers
+        layout: 0, nx: N, ny: 1, seg: [4, 6, 6, 8][Math.floor(r() * 4)],
+        bloomType: 1, radSeg: 6, seam: 1.0,
       };
     }
     // CLEAN GRID / QUAD / SPLIT — both axes split (balanced), seams H/V.
@@ -1951,6 +1996,8 @@ export class Visualizer {
     const turnRate = transFlux * 0.9;                  // strong turn while morphing
     const rotRate = (baseRate + turnRate) * (0.18 + 0.82 * axisGate);
     this.divWorld += dt * rotRate * this.divWorldDir;
+    // gentle continuous orbit for the "centers circling each other" bloom (bt1)
+    this.divOrbit += dt * (0.10 + this.autoEnergy * 0.08) * this.divWorldDir;
 
     const u = this.uAVals;
     u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
@@ -1965,9 +2012,12 @@ export class Visualizer {
       // innerSeg/sharp=1, count=3 (triangle pts OR radial segs by bloomType),
       // seam=2, bloomType=8 (0 grid, 1 triangle, 2 radial)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-      // radial rotation = worldRot ONLY (transition-driven turn + gentle idle +
-      // axis-dwell). No constant divSpin added — that was the dizzying spin.
-      u[11] = this.divWorld;
+      // radial/grid rotation = worldRot ONLY (transition turn + gentle idle +
+      // axis-dwell) — no constant spin. BUT the orbiting-centers bloom (bt1)
+      // adds a continuous gentle orbit so the 3 radial centers circle each other.
+      u[11] = (cur.bloomType > 0.5 && cur.bloomType < 1.5)
+        ? this.divWorld + this.divOrbit
+        : this.divWorld;
       u[4] = this.divSpin; u[7] = cur.swirl;
       u[1] = cur.seg; u[2] = cur.seam; u[8] = cur.bloomType;
       // uA[3] = count: radial segs (radial), triangle points (triangle), else 0
@@ -2125,8 +2175,8 @@ export class Visualizer {
 
   /** Set how fast the flow field's vector directions change over time. */
   private setFieldSpeed(speed: number) {
-    // clamp to a sane range; 0 = frozen field, ~0.9 = churning fast
-    this.fieldSpeed = speed <= 0 ? 0 : Math.min(0.9, Math.max(0.004, speed));
+    // clamp: 0 = frozen field, up to 0.99 = extreme churn of the underlying flow
+    this.fieldSpeed = speed <= 0 ? 0 : Math.min(0.99, Math.max(0.004, speed));
     this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed;
     this.onFieldSpeedChange(this.fieldSpeed);
   }
