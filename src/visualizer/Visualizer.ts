@@ -942,14 +942,26 @@ const displayFrag = /* glsl */ `
       //   swirl=7, innerSeg=1. uA[3] = triangle/ring point count (0 ⇒ grid).
       // grid and triangle both collapse to one point at center, so switching
       // which fold runs (committed at consolidation) is invisible — no seam.
+      // uA[2] = seamStrength (0 = original drawing, NO seams; 1 = full fold).
       vec2 uv;
       if (uDivide > 1.5) {
         uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
-      } else if (uA[3] > 2.5) {
-        // triangle/ring: rad=uA[10], worldRot=uA[11], spin=uA[4], swirl=uA[7], sharp=uA[1]
-        uv = triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1]);
       } else {
-        uv = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+        // SEAM-EMERGENCE model: the rest state is the ORIGINAL drawing (no
+        // seams). seamStrength blends original→folded, so seams EMERGE from the
+        // original (0→1), COLLAPSE back into it (1→0). At strength 0 EVERY
+        // pattern (grid/triangle/any count) looks identical (the original), so
+        // structure swaps there are perfectly invisible — no jagged jumps.
+        float seam = smoothstep(0.0, 1.0, uA[2]);
+        // whole-field rotation applies to the original too (rotate, then unfold)
+        vec2 base = vUv - 0.5; base.x *= aspect;
+        float wc = cos(uA[11]), ws = sin(uA[11]);
+        base = mat2(wc, -ws, ws, wc) * base;
+        vec2 original = base; original.x /= aspect; original += 0.5;
+        vec2 folded = (uA[3] > 2.5)
+          ? triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1])
+          : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+        uv = mix(original, folded, seam);
       }
       col = texture2D(tTrail, uv).rgb;
       col *= uExposure;
@@ -1800,10 +1812,16 @@ export class Visualizer {
     const f = this.divFrom, g = this.divTo, cur = this.divCur;
     cur.dx = L(f.dx, g.dx); cur.dy = L(f.dy, g.dy);
     cur.spin = L(f.spin, g.spin); cur.swirl = L(f.swirl, g.swirl);
-    // discrete structure: snap to target (only differs at d≈0 → invisible swap)
+    // discrete structure: snap to target. It only ever changes at the center
+    // retarget where seamStrength=0 (the original drawing), so the swap is
+    // invisible — no jagged structural jump.
     cur.kx = g.kx; cur.ky = g.ky;
     cur.layout = g.layout; cur.nx = g.nx; cur.ny = g.ny; cur.seg = g.seg;
     this.divSpin += dt * cur.spin * TAU;        // ONE shared spin phase (coherent)
+    // SEAM STRENGTH: toward a bloom seams EMERGE (0→1); toward center they
+    // COLLAPSE into the original (1→0). Held at 0 during the center dwell = the
+    // seamless original drawing, where the next structure is chosen.
+    const seamStrength = this.divAtBloom ? m : (1 - m);
     // (3) whole-screen rotation: a slow base turn, BOOSTED while a transition is
     // in flight (divT in (0,1)) so the whole composition swings through the
     // divide/merge. transFlux peaks mid-transition (sin curve), 0 when settled.
@@ -1820,10 +1838,11 @@ export class Visualizer {
       u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
     } else {
       // v1 slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4, swirl=7,
-      // innerSeg/sharp=1, triCount=3 (0 ⇒ grid; ≥3 ⇒ seamless triangle/ring)
+      // innerSeg/sharp=1, triCount=3 (0 ⇒ grid; ≥3 ⇒ triangle/ring),
+      // seamStrength=2 (0 ⇒ original drawing, no seams; 1 ⇒ full fold)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
       u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl;
-      u[1] = cur.seg; u[3] = cur.nx;
+      u[1] = cur.seg; u[3] = cur.nx; u[2] = seamStrength;
     }
   }
 
