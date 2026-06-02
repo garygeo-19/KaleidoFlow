@@ -32,7 +32,7 @@ type KaleidoMode = {
   centerPull: number; // orbital: gravity/weight of the center anchor (0 = none)
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
-  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide"; // special: auto-choreography driver (no own geometry)
+  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 const KALEIDO_MODES: KaleidoMode[] = [
@@ -40,6 +40,7 @@ const KALEIDO_MODES: KaleidoMode[] = [
   { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
   { name: "auto · divide", kind: -1, ...K0, auto: "divide" },
+  { name: "auto · divide v2", kind: -1, ...K0, auto: "dividev2" },
   { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
   { name: "auto · music", kind: -1, ...K0, auto: "music" },
   { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
@@ -789,6 +790,51 @@ const displayFrag = /* glsl */ `
     return q + 0.5;
   }
 
+  // signed cell-local coordinate: returns x relative to the NEAREST center, and
+  // writes that center + an integer cell id. (Signed, unlike fold1D's distance —
+  // needed so each cell can truly ROTATE rather than just mirror.)
+  float cellLocal(float x, float d, float keep, out float center, out float idx) {
+    float a = abs(x), s = sign(x);
+    center = s * d; idx = s;                 // bisect: nearest of ±d
+    if (keep > 0.5 && a < d * 0.5) { center = 0.0; idx = 0.0; } // trisect keeps mid
+    return x - center;
+  }
+
+  float hash2i(float a, float b) {
+    return fract(sin(a * 12.9898 + b * 78.233) * 43758.5453);
+  }
+
+  // DIVIDE v2: each focal cell rotates on ITS OWN, not around one global center.
+  // Cell-local coords are signed; each cell blends between two globally-accumulated
+  // spin phases (gPhase / gPhase2, often opposite directions) by a per-cell hash.
+  // The per-cell DIFFERENCE is gated by how far the cells have separated (gate=0
+  // at d≈0), so at consolidation every cell shares one rotation (smooth/continuous)
+  // and as they divide & move apart each brings in its own spin.
+  vec2 divideMoveV2(vec2 uv, float aspect, float dx, float dy, float kx, float ky,
+                    float gPhase, float gPhase2, float swirl, float localSeg) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    float cx, ix, cy, iy;
+    float lx = cellLocal(p.x, dx, kx, cx, ix);
+    float ly = cellLocal(p.y, dy, ky, cy, iy);
+    // per-cell rotation: pick how much of gPhase2 vs gPhase this cell follows,
+    // gated so the difference vanishes when consolidated (no boundary jump there).
+    float sel = step(0.5, hash2i(ix + 3.0, iy - 2.0));     // 0 or 1 per cell
+    float gate = smoothstep(0.0, 0.10, max(dx, dy));
+    float phase = gPhase + (gPhase2 - gPhase) * sel * gate;
+    float cs = cos(phase), sn = sin(phase);
+    vec2 lr = mat2(cs, -sn, sn, cs) * vec2(lx, ly);        // rotate cell-locally
+    // inner rotational fold (mod, seamless) for some symmetry within each cell
+    float rr = length(lr);
+    float aa = atan(lr.y, lr.x) + swirl * rr;
+    float lseg = TAU / max(localSeg, 1.0);
+    aa = mod(aa, lseg);
+    lr = rr * vec2(cos(aa), sin(aa));
+    vec2 q = vec2(cx, cy) + lr;
+    q.x /= aspect;
+    return q + 0.5;
+  }
+
   // dispatch one parameter set to its kaleidoscope mapping
   vec2 mapK(vec2 uv, float aspect,
             float kind, float seg, float rings, float pts, float bubbleRate,
@@ -821,8 +867,12 @@ const displayFrag = /* glsl */ `
     // DIVIDE-AND-MOVE: a single continuous fold (no crossfade, no fade) — the
     // journey eases dx/dy/kx/ky so points divide and slide apart / merge back.
     // uA slots: dx=uA[10], dy=uA[12], kx=uA[5], ky=uA[6], spinPhase=uA[4], swirl=uA[7]
+    // uDivide: 1 = v1 (one global rotation), 2 = v2 (each cell rotates its own,
+    //   gPhase2=uA[11], localSeg=uA[1]).
     if (uDivide > 0.5) {
-      vec2 uv = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[7]);
+      vec2 uv = uDivide > 1.5
+        ? divideMoveV2(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[11], uA[7], uA[1])
+        : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[7]);
       col = texture2D(tTrail, uv).rgb;
       col *= uExposure;
       col = col / (col + vec3(1.0));
@@ -953,7 +1003,7 @@ export class Visualizer {
   private mix = 0;
   private mixDur = 1.2;
   // auto-choreography driver
-  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | null = null;
+  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | null = null;
   private autoLabel = "";
   private autoTimer = 0; // cycle: time on current step
   private autoStep = 0; // cycle: index into AUTO_PROGRAM
@@ -987,7 +1037,9 @@ export class Visualizer {
   private divHold = 0;
   private divMoveDur = 4;
   private divAtBloom = false;
-  private divSpin = 0; // accumulated regional spin
+  private divSpin = 0; // accumulated regional spin (v1 + v2 primary)
+  private divSpin2 = 0; // v2: second (often opposite) per-cell spin phase
+  private divIsV2 = false;
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1314,7 +1366,7 @@ export class Visualizer {
   }
 
   /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
-  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide", label: string) {
+  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
     this.autoTimer = 0;
@@ -1344,8 +1396,10 @@ export class Visualizer {
       return;
     }
     // divide-and-move: a single continuous fold, no crossfade. Seed set A.
-    this.displayMat.uniforms.uDivide.value = kind === "divide" ? 1 : 0;
-    if (kind === "divide") {
+    // v1 = one global rotation (uDivide 1); v2 = per-cell rotations (uDivide 2).
+    this.displayMat.uniforms.uDivide.value = kind === "dividev2" ? 2 : kind === "divide" ? 1 : 0;
+    if (kind === "divide" || kind === "dividev2") {
+      this.divIsV2 = kind === "dividev2";
       this.displayMat.uniforms.uRotational.value = 0;
       this.modeB = null;
       this.mix = 0;
@@ -1353,6 +1407,7 @@ export class Visualizer {
       this.modeA = km(label, { kind: 0 });
       this.fillMode(this.modeA, this.uAVals);
       this.divSpin = 0;
+      this.divSpin2 = 0;
       this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
@@ -1617,11 +1672,16 @@ export class Visualizer {
     cur.kx = g.kx; cur.ky = g.ky;
     cur.spin = L(f.spin, g.spin); cur.swirl = L(f.swirl, g.swirl);
     this.divSpin += dt * cur.spin * TAU;
+    // v2: a second phase spinning the OTHER way (and a bit faster) so some cells
+    // counter-rotate. Accumulated, so the rate easing never causes a jump.
+    this.divSpin2 -= dt * (Math.abs(cur.spin) * 1.3 + 0.04) * TAU;
 
     const u = this.uAVals;
     u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
     u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
     u[4] = this.divSpin; u[7] = cur.swirl;
+    u[11] = this.divSpin2; // v2 second per-cell spin phase
+    u[1] = this.divIsV2 ? 4 : 6; // v2 inner localSeg per cell
   }
 
   /** Toggle the water-surface simulation (symmetry in the force field). When on,
@@ -1727,7 +1787,7 @@ export class Visualizer {
       return;
     }
 
-    if (this.autoMode === "divide") {
+    if (this.autoMode === "divide" || this.autoMode === "dividev2") {
       this.updateDivide(dt);
       return;
     }
