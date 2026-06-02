@@ -13,6 +13,7 @@ export default function App() {
   const [evolve, setEvolve] = useState(0);
   const [breathe, setBreathe] = useState({ rate: 0, peak: 0 });
   const [mode, setMode] = useState("");
+  const [seam, setSeam] = useState({ soft: 0, blur: 0 });
 
   const [status, setStatus] = useState("idle");
   const [bpm, setBpm] = useState(0);
@@ -31,6 +32,7 @@ export default function App() {
     viz.onFieldSpeedChange = setEvolve;
     viz.onBreatheChange = (rate, peak) => setBreathe({ rate, peak });
     viz.onModeChange = setMode;
+    viz.onSeamChange = (soft, blur) => setSeam({ soft, blur });
     viz.start();
     return () => {
       viz.dispose();
@@ -149,6 +151,9 @@ export default function App() {
         <b>[ ]</b> evolve: {evolve === 0 ? "frozen" : evolve.toFixed(3)} &nbsp;|&nbsp;{" "}
         <b>, .</b> breathe: {breathe.rate.toFixed(2)} &nbsp;|&nbsp;{" "}
         <b>- =</b> size: {breathe.peak.toFixed(0)}px
+        <br />
+        <b>s S</b> seam-soft: {seam.soft.toFixed(2)} &nbsp;|&nbsp;{" "}
+        <b>b B</b> trail-blur: {seam.blur.toFixed(1)}
       </div>
     </>
   );

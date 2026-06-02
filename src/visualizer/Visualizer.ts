@@ -826,6 +826,7 @@ export class Visualizer {
   onFieldSpeedChange: (speed: number) => void = () => {};
   onBreatheChange: (rate: number, peak: number) => void = () => {};
   onModeChange: (name: string) => void = () => {}; // active base mode (for the menu)
+  onSeamChange: (seam: number, blur: number) => void = () => {}; // seam soften + trail blur
 
   /** The full list of selectable mode names, in menu order. */
   static modeNames(): string[] {
@@ -898,7 +899,9 @@ export class Visualizer {
   private symHold = 0; // seconds left to dwell at the target before retargeting
   private symMoveDur = 4; // seconds for the current ease
   private symAtBloom = false; // is the current target a bloom (vs center)?
-  private symPendingN = 2; // point count chosen at center for the next bloom
+  private symNextBloom: SymPose = { numPoints: 2, focusR: 0, spin: 0, swirl: 0, circle: 0, localSeg: 6 };
+  private symGoalN = 2; // structure we WANT (committed only while consolidated)
+  private symGoalSeg = 6;
   private symPhase = 0; // accumulated whole-figure rotation (radians)
   private symSpin = 0; // accumulated regional spin (radians)
   // fold-structure crossfade: dissolve old N/fold → new over symStructMix
@@ -1176,12 +1179,14 @@ export class Visualizer {
   private setSeamSoft(v: number) {
     this.seamSoft = Math.min(1.5, Math.max(0, v));
     this.displayMat.uniforms.uSeamSoft.value = this.seamSoft;
+    this.onSeamChange(this.seamSoft, this.trailBlur);
   }
 
   /** Isotropic trail blur in texels (0 = crisp streaks, higher = rounder ink). */
   private setTrailBlur(v: number) {
     this.trailBlur = Math.min(4, Math.max(0, v));
     this.fadeMat.uniforms.uTrailBlur.value = this.trailBlur;
+    this.onSeamChange(this.seamSoft, this.trailBlur);
   }
 
   /** Switch kaleidoscope entry by index (wraps). Auto entries start a driver. */
@@ -1269,16 +1274,18 @@ export class Visualizer {
       this.displayMat.uniforms.uMix.value = 0;
       this.modeA = km(label, { kind: 9, segments: 8 });
       this.fillMode(this.modeA, this.uAVals);
-      // start consolidated at center, then immediately roll a first bloom target
+      // start consolidated at center, then open into a freshly-rolled bloom
       this.symFrom = this.centerPose();
       this.symCur = { ...this.symFrom };
       this.symTo = this.symFrom;
+      this.symNextBloom = this.randomBloom(); // the bloom the first update opens into
       this.symAtBloom = false; // next arrival is a bloom
       this.symT = 1; // force an immediate retarget on first update
       this.symHold = 0;
-      // start with both structures equal (no fade in progress)
-      this.symStructN = this.symOldN = this.symFrom.numPoints;
-      this.symStructSeg = this.symOldSeg = this.symFrom.localSeg;
+      // begin already showing the first bloom's structure (we're consolidated, so
+      // committing it now is invisible) — avoids a 1st-frame structure mismatch.
+      this.symStructN = this.symOldN = this.symGoalN = this.symNextBloom.numPoints;
+      this.symStructSeg = this.symOldSeg = this.symGoalSeg = this.symNextBloom.localSeg;
       this.symStructMix = 1;
       this.updateSymJourney(0); // write initial params
     } else {
@@ -1338,16 +1345,20 @@ export class Visualizer {
       if (this.symHold <= 0) {
         this.symFrom = { ...this.symCur };
         if (this.symAtBloom) {
-          // return to center; carry the NEXT bloom's N so the count change is hidden
-          this.symPendingN = SYM_POINT_COUNTS[Math.floor(Math.random() * SYM_POINT_COUNTS.length)];
-          this.symTo = this.centerPose(this.symPendingN);
+          // leaving a bloom → head to center. Roll the NEXT bloom NOW and record
+          // its structure as the GOAL; we only COMMIT the structure swap once the
+          // points have collapsed to the center (focusR≈0), below.
+          this.symNextBloom = this.randomBloom();
+          this.symGoalN = this.symNextBloom.numPoints;
+          this.symGoalSeg = this.symNextBloom.localSeg;
+          this.symTo = this.centerPose(this.symGoalN);
           this.symMoveDur = 3.5 + Math.random() * 2.5;
           this.symHold = 3 + Math.random() * 6; // pause at center (longer sometimes)
           this.symAtBloom = false;
         } else {
-          const bloom = this.randomBloom();
-          bloom.numPoints = this.symPendingN || bloom.numPoints; // N chosen at center
-          this.symTo = bloom;
+          // leaving center → open into the pre-rolled bloom (structure already
+          // settled to its N during the consolidated dwell, so opening is clean).
+          this.symTo = this.symNextBloom;
           this.symMoveDur = 4 + Math.random() * 3;
           this.symHold = 4 + Math.random() * 5; // dwell in the bloom
           this.symAtBloom = true;
@@ -1368,22 +1379,22 @@ export class Visualizer {
     cur.circle = L(f.circle, g.circle); // rate fed into accumulated symPhase → safe
     cur.spin = L(f.spin, g.spin);       // rate fed into accumulated symSpin → safe
 
-    // DISCRETE fold structure (N, localSeg). A post-process fold can't lerp these
-    // without an instant re-tile — so when the target structure differs from
-    // what's showing, we CROSSFADE the two integer folds over the SAME flowing
-    // field (symStructMix 0→1 over ~2.5s): old symmetry quietly gives way to new.
-    const targetN = (this.symAtBloom ? g : f).numPoints;
-    const targetSeg = (this.symAtBloom ? g : f).localSeg;
-    if (targetN !== this.symStructN || targetSeg !== this.symStructSeg) {
-      // a new structure to reach: park the current one as "old", begin the fade
+    // DISCRETE fold structure (N, localSeg). A post-process fold can't lerp these,
+    // and crossfading two distinct folds is only invisible while the points are
+    // COLLAPSED at the center (all fold counts look like one blob). So we ONLY
+    // commit a structure change when focusR is below a small threshold, and fade
+    // it FAST so it completes before the points open up again — no ghost double-
+    // exposure of two fold counts at a visible radius.
+    const consolidated = cur.focusR < 0.06;
+    if (consolidated && (this.symGoalN !== this.symStructN || this.symGoalSeg !== this.symStructSeg)) {
       this.symOldN = this.symStructN;
       this.symOldSeg = this.symStructSeg;
-      this.symStructN = targetN;
-      this.symStructSeg = targetSeg;
+      this.symStructN = this.symGoalN;
+      this.symStructSeg = this.symGoalSeg;
       this.symStructMix = 0;
     }
     if (this.symStructMix < 1) {
-      this.symStructMix = Math.min(1, this.symStructMix + dt / 2.5); // ~2.5s fade
+      this.symStructMix = Math.min(1, this.symStructMix + dt / 0.9); // fast (~0.9s) at center
     }
 
     // advance rotation PHASES from their rates (accumulation makes rate changes
@@ -1675,6 +1686,7 @@ export class Visualizer {
     this.onPaletteChange(PALETTES[this.paletteIndex].name);
     this.onFieldSpeedChange(this.fieldSpeed);
     this.onBreatheChange(this.breatheRate, this.breathePeak);
+    this.onSeamChange(this.seamSoft, this.trailBlur);
     this.clock.start();
     this.loop();
   }
