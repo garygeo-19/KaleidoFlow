@@ -765,7 +765,12 @@ const displayFrag = /* glsl */ `
 
     vec3 col;
     bool bothMorph = int(uA[0] + 0.5) == 9 && int(uB[0] + 0.5) == 9;
-    if (uMix > 0.001 && bothMorph) {
+    // NOTE: do NOT also gate on uMix here. When a fold-count crossfade begins,
+    // uMix resets to 0 for one frame; if that frame fell through to the mapK
+    // branch (which doesn't apply the seam feather) the seams would flash bright
+    // for a single frame every structure change. Always take the feathered path
+    // when both sets are symMorph — at uMix=0 it just shows set A, feathered.
+    if (bothMorph) {
       // STRUCTURE crossfade. The continuous params (focusR, rotation, swirl) are
       // shared/lerped so the underlying flow is one continuous field; only the
       // FOLD STRUCTURE (point count N + regional fold) differs between A and B.
@@ -1611,24 +1616,24 @@ export class Visualizer {
     if (this.modeB) this.uBVals[14] = this.modeB.points;
   }
 
-  /** Map sampled music signals onto the engine, modulating around base values. */
+  /** Map sampled music signals onto the engine. LIGHT + COLOR ONLY — the music
+   *  must NOT change particle motion/speed/field, because faster motion against
+   *  the fixed trail decay reads as varying blur. Motion stays constant; the
+   *  beat lives entirely in brightness, contrast, exposure, and color. */
   private applyAudio(dt: number) {
     if (!this.audioEl || !this.flow) return;
     const s = this.flow.sample(this.audioEl.currentTime);
     // brightness pulses with the beat + overall loudness
     this.pointsMat.uniforms.uIntensity.value =
       this.intensity * (0.5 + s.loudness * 0.7 + s.pulse * 1.1);
-    // particles swell on the kick (kept, this is "breathing" not travel)
-    this.pointsMat.uniforms.uSizeMax.value =
-      this.breathePeak * (1.0 + s.pulse * 0.5 + s.bass * 0.3);
-    // MUSIC → COLOR, not travel. The beat mainly moves the palette/hue, only
-    // gently nudging the flow so particles don't lurch around on every kick.
-    this.velocityVar.material.uniforms.uCurlStrength.value = 1.0 + s.bass * 0.5;
-    this.positionVar.material.uniforms.uSpeed.value = 1.0 + s.bass * 0.2 + s.pulse * 0.15;
-    this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed * (1.0 + s.loudness * 0.3);
-    // color is where the music really lives now: beat + treble push the hue
-    // phase, and per-particle color spread widens with energy so the palette
-    // visibly shifts/shimmers on the beat instead of the particles jumping.
+    // motion uniforms pinned to base every frame so blur is constant w/ music
+    this.pointsMat.uniforms.uSizeMax.value = this.breathePeak;
+    this.velocityVar.material.uniforms.uCurlStrength.value = 1.0;
+    this.positionVar.material.uniforms.uSpeed.value = 1.0;
+    this.velocityVar.material.uniforms.uFieldSpeed.value = this.fieldSpeed;
+    // color is where the music lives: beat + treble push the hue phase, and
+    // per-particle color spread widens with energy so the palette visibly
+    // shifts/shimmers on the beat.
     this.pointsMat.uniforms.uColorPhase.value += (s.treble * 0.10 + s.pulse * 0.12 + s.loudness * 0.04) * dt;
     const tgtSpread = 0.4 + s.loudness * 0.5 + s.pulse * 0.3;
     const sp = this.pointsMat.uniforms.uColorSpread;
