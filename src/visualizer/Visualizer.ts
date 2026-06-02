@@ -32,13 +32,14 @@ type KaleidoMode = {
   centerPull: number; // orbital: gravity/weight of the center anchor (0 = none)
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
-  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2"; // special: auto-choreography driver (no own geometry)
+  auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | "radialdiv"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 const KALEIDO_MODES: KaleidoMode[] = [
   // ── auto-choreography leads: these are the headline modes; symmetry is default ──
   { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
+  { name: "auto · radial", kind: -1, ...K0, auto: "radialdiv" },
   { name: "auto · divide", kind: -1, ...K0, auto: "divide" },
   { name: "auto · split", kind: -1, ...K0, auto: "dividev2" },
   { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
@@ -947,7 +948,22 @@ const displayFrag = /* glsl */ `
       // which fold runs (committed at consolidation) is invisible — no seam.
       // uA[2] = seamStrength (0 = original drawing, NO seams; 1 = full fold).
       vec2 uv;
-      if (uDivide > 1.5) {
+      if (uDivide > 2.5) {
+        // RADIAL-BASE hybrid (auto · radial): the BASE is a clean radial fold
+        // (uA[9] segments) — a symmetric home like auto·symmetry — and the bloom
+        // (grid/triangle/radial) EMERGES from it via seam. seam 0 = pure clean
+        // radial home (bloom hidden); seam 1 = the bloom (base hidden). So the
+        // base radial seg can swap invisibly at seam 1, and the bloom structure
+        // at seam 0 — both directions clean, always consolidates to radial.
+        float seam = smoothstep(0.0, 1.0, uA[2]);
+        vec2 baseR = radial(vUv, max(uA[9], 2.0), uA[11], aspect);
+        int bt = int(uA[8] + 0.5);
+        vec2 folded;
+        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
+        else if (bt == 1) folded = triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1]);
+        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+        uv = mix(baseR, folded, seam);
+      } else if (uDivide > 1.5) {
         uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
       } else {
         // SEAM-EMERGENCE model: the rest state is the ORIGINAL drawing (no
@@ -1100,7 +1116,7 @@ export class Visualizer {
   private mix = 0;
   private mixDur = 1.2;
   // auto-choreography driver
-  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | null = null;
+  private autoMode: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | "radialdiv" | null = null;
   private autoLabel = "";
   private autoTimer = 0; // cycle: time on current step
   private autoStep = 0; // cycle: index into AUTO_PROGRAM
@@ -1137,6 +1153,8 @@ export class Visualizer {
   private divSpin = 0; // accumulated regional spin (v1 + v2 primary)
   private divSpin2 = 0; // v2: second (often opposite) per-cell spin phase
   private divIsV2 = false;
+  private divIsRadial = false; // auto · radial: clean radial base instead of original
+  private divBaseSeg = 8; // base-radial fold count (radialdiv home)
   private divWorld = 0; // accumulated whole-screen rotation (v1)
   private divWorldDir = 1; // current whole-screen rotation direction (±1)
   private divHomeSeg = 6; // radial-home fold count (kept stable across blooms)
@@ -1466,7 +1484,7 @@ export class Visualizer {
   }
 
   /** Enter an auto-choreography mode (timed wander, energy ladder, or journey). */
-  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2", label: string) {
+  private startAuto(kind: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | "radialdiv", label: string) {
     this.autoMode = kind;
     this.autoLabel = label;
     this.autoTimer = 0;
@@ -1495,11 +1513,13 @@ export class Visualizer {
       this.emitKaleidoLabel();
       return;
     }
-    // divide-and-move: a single continuous fold, no crossfade. Seed set A.
-    // v1 = one global rotation (uDivide 1); v2 = per-cell rotations (uDivide 2).
-    this.displayMat.uniforms.uDivide.value = kind === "dividev2" ? 2 : kind === "divide" ? 1 : 0;
-    if (kind === "divide" || kind === "dividev2") {
+    // divide family: a single continuous fold, no crossfade. Seed set A.
+    // uDivide: 1 = divide (orig base), 2 = split (symCells), 3 = radial (radial base).
+    this.displayMat.uniforms.uDivide.value =
+      kind === "dividev2" ? 2 : kind === "divide" ? 1 : kind === "radialdiv" ? 3 : 0;
+    if (kind === "divide" || kind === "dividev2" || kind === "radialdiv") {
       this.divIsV2 = kind === "dividev2";
+      this.divIsRadial = kind === "radialdiv";
       this.displayMat.uniforms.uRotational.value = 0;
       this.modeB = null;
       this.mix = 0;
@@ -1510,6 +1530,7 @@ export class Visualizer {
       this.divSpin2 = 0;
       this.divWorld = 0;
       this.divWorldDir = Math.random() < 0.5 ? -1 : 1;
+      this.divBaseSeg = [6, 8, 8, 12][Math.floor(Math.random() * 4)];
       this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 , bloomType: 2, radSeg: 6, seam: 0 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
@@ -1818,15 +1839,16 @@ export class Visualizer {
       if (this.divHold <= 0) {
         this.divFrom = { ...this.divCur };
         if (this.divAtBloom) {
-          // return to HOME: a gentle central radial (NOT the bare original).
-          // ~1 in 9 times, rest on the true original (seam 0) as a rare breath.
           if (this.divIsV2) {
             this.divTo = this.splitCenterPose(this.divCur);
+          } else if (this.divIsRadial) {
+            // auto · radial: HOME = pure clean radial base (seam 0, bloom hidden).
+            // Re-roll the base radial fold count NOW (during the bloom, seam high,
+            // base hidden) so the home seg change is invisible; carry otherwise.
+            if (Math.random() < 0.4) this.divBaseSeg = [6, 8, 8, 10, 12][Math.floor(Math.random() * 5)];
+            this.divTo = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.03, swirl: 0.4, layout: 0, nx: 0, ny: 1, seg: 1, bloomType: 2, radSeg: this.divCur.radSeg, seam: 0 };
           } else {
             const home = this.radialHome();
-            // keep the home's radial fold count stable across blooms (only ~25%
-            // re-roll) so the radSeg doesn't visibly jump at the partly-folded
-            // home; carry the last home radSeg otherwise.
             if (Math.random() < 0.75 && this.divHomeSeg > 0) home.radSeg = this.divHomeSeg;
             this.divHomeSeg = home.radSeg;
             if (Math.random() < 0.11) home.seam = 0.0; // rare bare-original rest
@@ -1900,6 +1922,7 @@ export class Visualizer {
       u[1] = cur.seg; u[2] = cur.seam; u[8] = cur.bloomType;
       // uA[3] = count: radial segs (radial), triangle points (triangle), else 0
       u[3] = cur.bloomType > 1.5 ? cur.radSeg : (cur.bloomType > 0.5 ? cur.nx : 0);
+      u[9] = this.divBaseSeg; // radial-base fold count (auto · radial)
     }
   }
 
@@ -2006,7 +2029,7 @@ export class Visualizer {
       return;
     }
 
-    if (this.autoMode === "divide" || this.autoMode === "dividev2") {
+    if (this.autoMode === "divide" || this.autoMode === "dividev2" || this.autoMode === "radialdiv") {
       this.updateDivide(dt);
       return;
     }
@@ -2167,8 +2190,8 @@ export class Visualizer {
   start() {
     if (this.running) return;
     this.running = true;
-    // default to auto·divide (user's pick). other modes kept in the menu.
-    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · divide"));
+    // default to auto·radial (radial base + divide transitions). others in menu.
+    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · radial"));
     // push current state so the HUD reflects it immediately
     this.emitKaleidoLabel();
     this.onPaletteChange(PALETTES[this.paletteIndex].name);
