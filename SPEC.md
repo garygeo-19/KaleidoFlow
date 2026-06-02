@@ -1,4 +1,9 @@
-# Music Visualizer — Specification
+# KaleidoFlow — Original Specification
+
+> **Note:** this is the original design spec, kept for history. The project
+> evolved significantly during development — see `README.md` for how KaleidoFlow
+> actually works today (the four "evolving" modes, the seam-emergence transition
+> model, etc.). This document captures the initial direction.
 
 ## 1. Concept
 

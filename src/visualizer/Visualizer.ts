@@ -1,3 +1,21 @@
+/**
+ * KaleidoFlow rendering engine.
+ *
+ * A GPGPU particle flow field (curl-noise advection in ping-pong float
+ * textures) drawn additively into feedback/trail buffers, then composited
+ * through a kaleidoscope + tone-map + cosine palette display pass.
+ *
+ * Symmetry is a post-process FOLD of the trail in `displayFrag`. The several
+ * fold functions (radial, triangle kaleidoscope, N-fold dihedral `symMorph`,
+ * the `divideMove` grid fold, the force-field `surface` mode…) are selected by
+ * the active mode. The four menu modes are auto-choreographed "drivers"
+ * (`updateSymJourney`, `updateDivide`, `updateSurface`) that ease a set of fold
+ * parameters over time; transitions emerge/collapse seams through a clean
+ * symmetric base so structure changes are seamless.
+ *
+ * Music (sampled from the precomputed FlowMap each frame in `applyAudio`) drives
+ * only LIGHT and COLOUR — never particle motion — so the flow stays smooth.
+ */
 import * as THREE from "three";
 import {
   GPUComputationRenderer,

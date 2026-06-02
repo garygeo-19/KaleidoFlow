@@ -1,3 +1,9 @@
+/**
+ * KaleidoFlow UI shell. Owns the <canvas> + <audio> element, creates the
+ * Visualizer, and renders the chrome: a top bar (transport + mode buttons) and
+ * a full-width info line. Loading a track analyzes it offline (analyzeTrack →
+ * FlowMap) then attaches a FlowPlayer the engine samples each frame.
+ */
 import { useEffect, useRef, useState } from "react";
 import { Visualizer } from "./visualizer/Visualizer";
 import { analyzeTrack } from "./audio/analyzer";

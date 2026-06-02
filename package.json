@@ -1,7 +1,9 @@
 {
-  "name": "music-visualizer",
+  "name": "kaleidoflow",
   "private": true,
   "version": "0.1.0",
+  "description": "A generative music visualizer — an evolving kaleidoscope driven by a GPU particle flow field.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
