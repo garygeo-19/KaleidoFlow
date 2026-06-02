@@ -1373,8 +1373,12 @@ export class Visualizer {
     const L = (x: number, y: number) => x + (y - x) * m;
     const f = this.symFrom, g = this.symTo;
     const cur = this.symCur;
-    // CONTINUOUS params flow smoothly — these are what visibly morphs:
-    cur.focusR = L(f.focusR, g.focusR) * (1 + this.autoEnergy * 0.22); // open/close
+    // CONTINUOUS params flow smoothly — these are what visibly morphs. Keep them
+    // in RAW pose space (no energy boost here): symFrom is a copy of symCur at
+    // each leg boundary, so any factor baked in here would COMPOUND every leg and
+    // pop focusR by that factor at the boundary. The energy boost is applied only
+    // at the uniform write below.
+    cur.focusR = L(f.focusR, g.focusR); // open/close (raw)
     cur.swirl = L(f.swirl, g.swirl);   // swirl*radius, no uTime amplification → safe
     cur.circle = L(f.circle, g.circle); // rate fed into accumulated symPhase → safe
     cur.spin = L(f.spin, g.spin);       // rate fed into accumulated symSpin → safe
@@ -1407,9 +1411,12 @@ export class Visualizer {
     // dissolves between them. After the fade A==B so it's a no-op until next N.
     const A = this.uAVals, B = this.uBVals;
     const mix = this.symStructMix * this.symStructMix * (3 - 2 * this.symStructMix);
+    // apply the energy boost HERE (not into symCur) so it never compounds across
+    // legs. Smoothed autoEnergy → no per-frame jitter in the rendered radius.
+    const focusOut = cur.focusR * (1 + this.autoEnergy * 0.22);
     for (const u of [A, B]) {
       u[0] = 9;
-      u[10] = cur.focusR;
+      u[10] = focusOut;
       u[4] = this.symPhase;
       u[7] = this.symSpin;
       u[5] = cur.swirl;
