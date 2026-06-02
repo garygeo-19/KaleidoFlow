@@ -35,57 +35,14 @@ type KaleidoMode = {
   auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | "radialdiv"; // special: auto-choreography driver (no own geometry)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
+// The curated menu — four polished evolving modes. (The shader still contains
+// the other fold kinds 1-9 used internally by these modes; only the menu is
+// trimmed.) "evolving symmetry" is the headline/default.
 const KALEIDO_MODES: KaleidoMode[] = [
-  // ── auto-choreography leads: these are the headline modes; symmetry is default ──
-  { name: "surface", kind: -1, ...K0, auto: "surface" },
-  { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
-  { name: "auto · radial", kind: -1, ...K0, auto: "radialdiv" },
-  { name: "auto · divide", kind: -1, ...K0, auto: "divide" },
-  { name: "auto · split", kind: -1, ...K0, auto: "dividev2" },
-  { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
-  { name: "auto · music", kind: -1, ...K0, auto: "music" },
-  { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
-  { name: "off", kind: 0, ...K0 },
-  { name: "radial 8×", kind: 1, ...K0, segments: 8 },
-  { name: "radial 12×", kind: 1, ...K0, segments: 12 },
-  { name: "grid 3×", kind: 2, ...K0, segments: 3 },
-  { name: "polar 6×", kind: 3, ...K0, segments: 6, rings: 3 },
-  // ── multipoint "bubbling moving mirrors" — scattered centers ──
-  { name: "bubble 3 · drift", kind: 4, ...K0, points: 3, bubbleRate: 0.05, driftAmt: 0.13, driftSpeed: 0.08, rotSpeed: 0.06, segPerPoint: 6, blendSharp: 6 },
-  { name: "bubble 5 · churn", kind: 4, ...K0, points: 5, bubbleRate: 0.10, driftAmt: 0.18, driftSpeed: 0.16, rotSpeed: 0.12, segPerPoint: 5, blendSharp: 9 },
-  { name: "swirl 4 · evolve", kind: 4, ...K0, points: 4, bubbleRate: 0.07, driftAmt: 0.22, driftSpeed: 0.12, rotSpeed: 0.30, segPerPoint: 8, blendSharp: 5 },
-  // ── orbital: center gravity + satellites swirling/bubbling around it ──
-  // (mirror count varied independently of orbit/drift to show the two axes)
-  { name: "orbit calm 6×", kind: 5, ...K0, points: 3, segPerPoint: 6, bubbleRate: 0.06, driftAmt: 0.04, driftSpeed: 0.10, rotSpeed: 0.05, blendSharp: 7, orbitRadius: 0.26, orbitSpeed: 0.10, centerPull: 1.4 },
-  { name: "orbit swirl 8×", kind: 5, ...K0, points: 4, segPerPoint: 8, bubbleRate: 0.09, driftAmt: 0.06, driftSpeed: 0.16, rotSpeed: 0.10, blendSharp: 8, orbitRadius: 0.30, orbitSpeed: 0.28, centerPull: 1.0 },
-  { name: "orbit chaos 5×", kind: 5, ...K0, points: 5, segPerPoint: 5, bubbleRate: 0.13, driftAmt: 0.12, driftSpeed: 0.22, rotSpeed: 0.18, blendSharp: 9, orbitRadius: 0.34, orbitSpeed: 0.40, centerPull: 0.7 },
-  { name: "orbit bloom 12×", kind: 5, ...K0, points: 3, segPerPoint: 12, bubbleRate: 0.05, driftAmt: 0.05, driftSpeed: 0.08, rotSpeed: 0.04, blendSharp: 6, orbitRadius: 0.18, orbitSpeed: 0.08, centerPull: 1.8 },
-  // ── bounce: swirl centers ricocheting off the screen edges, varied speeds ──
-  { name: "bounce 2 · slow", kind: 6, ...K0, points: 2, segPerPoint: 6, rotSpeed: 0.05, blendSharp: 7, bounceSpeed: 0.06 },
-  { name: "bounce 3 · mixed", kind: 6, ...K0, points: 3, segPerPoint: 8, rotSpeed: 0.08, blendSharp: 8, bounceSpeed: 0.11 },
-  { name: "bounce 3 · fast", kind: 6, ...K0, points: 3, segPerPoint: 5, rotSpeed: 0.12, blendSharp: 9, bounceSpeed: 0.22 },
-  { name: "bounce 2 · swirl", kind: 6, ...K0, points: 2, segPerPoint: 12, rotSpeed: 0.28, blendSharp: 6, bounceSpeed: 0.09 },
-  // ── swarm: bounce centers whose COUNT tracks music intensity ──
-  // crescendo → up to `points` swirls fill the screen; mellow → collapses to ~1.
-  { name: "swarm 6 · slow", kind: 6, ...K0, points: 6, segPerPoint: 6, rotSpeed: 0.05, blendSharp: 7, bounceSpeed: 0.06, reactive: 1 },
-  { name: "swarm 6 · mixed", kind: 6, ...K0, points: 6, segPerPoint: 8, rotSpeed: 0.08, blendSharp: 8, bounceSpeed: 0.11, reactive: 1 },
-  { name: "swarm 6 · fast", kind: 6, ...K0, points: 6, segPerPoint: 5, rotSpeed: 0.12, blendSharp: 9, bounceSpeed: 0.20, reactive: 1 },
-  { name: "swarm 5 · swirl", kind: 6, ...K0, points: 5, segPerPoint: 12, rotSpeed: 0.26, blendSharp: 6, bounceSpeed: 0.09, reactive: 1 },
-  // ── symmetric: guaranteed N-fold dihedral; motion = spin + radius-swirl +
-  //    radial breathe. seg=N, rotSpeed=spin, driftAmt=swirl, orbitRadius=breatheAmt,
-  //    driftSpeed=breatheSpeed. No scattered centers, so always symmetrical. ──
-  { name: "sym mirror 6×", kind: 7, ...K0, segments: 6, rotSpeed: 0.05 },
-  { name: "sym orbit 8×", kind: 7, ...K0, segments: 8, rotSpeed: 0.10, driftAmt: 2.6, orbitRadius: 0.05, driftSpeed: 0.6 },
-  { name: "sym balance 8×", kind: 7, ...K0, segments: 8, rotSpeed: 0.05, driftAmt: 1.2, orbitRadius: 0.16, driftSpeed: 0.45 },
-  // symmetric multi-center: focal points split apart while staying mirror-symmetric
-  { name: "sym split 2×", kind: 8, ...K0, points: 2, segPerPoint: 5, rotSpeed: 0.10, orbitRadius: 0.14, driftAmt: 0.22, orbitSpeed: 0.11 },
-  { name: "sym split 4×", kind: 8, ...K0, points: 4, segPerPoint: 5, rotSpeed: 0.08, orbitRadius: 0.13, driftAmt: 0.18, orbitSpeed: 0.11 },
-  // unified symMorph space (kind 9) — the morph-friendly auto·symmetry family.
-  // slot map: splitX=orbitRadius, splitY=centerPull, spin=rotSpeed, swirl=driftAmt, moveAmp=bubbleRate, moveSpeed=orbitSpeed
-  // kind-9 slots: points=numPoints, segments=localSeg, orbitRadius=focusR, rotSpeed=spin, driftAmt=swirl
-  { name: "morph · two", kind: 9, ...K0, points: 2, segments: 6, orbitRadius: 0.24, rotSpeed: 0.09, driftAmt: 2.0 },
-  { name: "morph · triangle", kind: 9, ...K0, points: 3, segments: 6, orbitRadius: 0.26, rotSpeed: 0.10, driftAmt: 2.4 },
-  { name: "morph · eight", kind: 9, ...K0, points: 8, segments: 4, orbitRadius: 0.20, rotSpeed: 0.12, driftAmt: 2.8 },
+  { name: "evolving symmetry", kind: -1, ...K0, auto: "radialdiv" }, // radial home + grids/triangles
+  { name: "evolving surface", kind: -1, ...K0, auto: "surface" },    // water flow field
+  { name: "evolving morph", kind: -1, ...K0, auto: "symmetry" },     // continuous symMorph journey
+  { name: "evolving pinwheel", kind: -1, ...K0, auto: "pinwheel" },  // seamless rotational/spiral
 ];
 
 // quick constructor for ad-hoc presets (low mirror counts not in the K cycle)
@@ -94,42 +51,6 @@ const km = (name: string, over: Partial<KaleidoMode> & { kind: number }): Kaleid
   ...K0,
   ...over,
 });
-const findMode = (n: string): KaleidoMode => KALEIDO_MODES.find((m) => m.name === n)!;
-
-// AUTO "flow": a curated wander — simple → complex → simple, looped. The list
-// rises from a single/two-mirror look up through orbit/swirl/bounce, then eases
-// back down, so even without music it feels like a natural progression.
-const AUTO_PROGRAM: KaleidoMode[] = [
-  km("two mirror", { kind: 1, segments: 2 }),
-  km("single", { kind: 1, segments: 1 }),
-  km("two mirror", { kind: 1, segments: 2 }),
-  km("four mirror", { kind: 1, segments: 4 }),
-  findMode("polar 6×"),
-  findMode("orbit calm 6×"),
-  findMode("orbit swirl 8×"),
-  findMode("bounce 3 · mixed"),
-  findMode("orbit chaos 5×"),
-  findMode("swirl 4 · evolve"),
-  findMode("orbit swirl 8×"),
-  findMode("orbit calm 6×"),
-  findMode("polar 6×"),
-  km("four mirror", { kind: 1, segments: 4 }),
-  km("two mirror", { kind: 1, segments: 2 }),
-];
-
-// AUTO "music": an energy ladder, simplest → busiest. Smoothed track energy
-// picks the rung (one step at a time, with hysteresis) so quiet = few mirrors,
-// crescendo = orbiting/swarming. Top rung is reactive (swirl count tracks volume).
-const AUTO_LADDER: KaleidoMode[] = [
-  km("single", { kind: 1, segments: 1 }),
-  km("two mirror", { kind: 1, segments: 2 }),
-  km("four mirror", { kind: 1, segments: 4 }),
-  findMode("polar 6×"),
-  findMode("orbit calm 6×"),
-  findMode("orbit swirl 8×"),
-  findMode("swarm 6 · mixed"),
-];
-
 // AUTO "symmetry" is a GENERATIVE journey (not fixed keyframes). It breathes
 // between two pose types — CENTER (all points consolidated at the middle, a
 // calm pause) and BLOOM (points spread into an N-fold ring that spins/circles).
@@ -1635,9 +1556,6 @@ export class Visualizer {
       this.symStructSeg = this.symOldSeg = this.symGoalSeg = this.symNextBloom.localSeg;
       this.symStructMix = 1;
       this.updateSymJourney(0); // write initial params
-    } else {
-      const first = kind === "cycle" ? AUTO_PROGRAM[0] : AUTO_LADDER[0];
-      this.transitionTo(first, 2.0);
     }
     this.emitKaleidoLabel();
   }
@@ -2187,44 +2105,6 @@ export class Visualizer {
       this.updateDivide(dt);
       return;
     }
-
-    if (this.autoMode === "cycle") {
-      this.autoTimer += dt;
-      if (this.autoTimer > 9 && !this.modeB) {
-        this.autoTimer = 0;
-        this.autoStep = (this.autoStep + 1) % AUTO_PROGRAM.length;
-        this.transitionTo(AUTO_PROGRAM[this.autoStep], 3.5);
-        this.emitKaleidoLabel();
-      }
-      return;
-    }
-
-    // music: pick the ladder rung from slow-smoothed track energy.
-    // When nothing is playing, drift the energy on a slow sine so it still
-    // wanders the ladder (nice as an idle screensaver without a track).
-    let e: number;
-    if (this.audioEl && this.flow && !this.audioEl.paused && !this.audioEl.ended) {
-      const s = this.flow.sample(this.audioEl.currentTime);
-      e = Math.min(1, s.loudness * 1.2 + s.bass * 0.2);
-    } else {
-      e = 0.5 + 0.5 * Math.sin(this.clock.elapsedTime * 0.06);
-    }
-    this.autoEnergy += (e - this.autoEnergy) * (1 - Math.exp(-dt * 0.5)); // ~2s smoothing
-    const ladder = AUTO_LADDER;
-    const top = ladder.length - 1;
-    const lvl = Math.max(0, Math.min(1, this.autoEnergy)) * top;
-    if (!this.modeB && this.autoCooldown <= 0) {
-      let desired = this.autoTier;
-      if (lvl > this.autoTier + 0.6) desired = this.autoTier + 1; // step up one rung
-      else if (lvl < this.autoTier - 0.6) desired = this.autoTier - 1; // step down one
-      desired = Math.max(0, Math.min(top, desired));
-      if (desired !== this.autoTier) {
-        this.autoTier = desired;
-        this.transitionTo(ladder[desired], 3.0);
-        this.autoCooldown = 4; // min seconds between rung changes
-        this.emitKaleidoLabel();
-      }
-    }
   }
 
   /** Set how fast the flow field's vector directions change over time. */
@@ -2344,8 +2224,8 @@ export class Visualizer {
   start() {
     if (this.running) return;
     this.running = true;
-    // default to auto·radial (radial base + divide transitions). others in menu.
-    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "auto · radial"));
+    // default to "evolving symmetry" (the headline mode).
+    this.setKaleido(KALEIDO_MODES.findIndex((m) => m.name === "evolving symmetry"));
     // push current state so the HUD reflects it immediately
     this.emitKaleidoLabel();
     this.onPaletteChange(PALETTES[this.paletteIndex].name);
