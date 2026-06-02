@@ -1221,6 +1221,9 @@ export class Visualizer {
   private divWorldDir = 1; // current whole-screen rotation direction (±1)
   private divHomeSeg = 6; // radial-home fold count (kept stable across blooms)
   private divOrbit = 0; // accumulated orbit for the centers-circling bloom
+  // worldRot is eased from→to per leg, landing on a L/R-symmetric angle (radial)
+  private divWorldFrom = 0;
+  private divWorldTo = 0;
 
   // surface (water) driver — symmetry lives in the force field; the display
   // kaleido fold is OFF. Pose machine like the journey, but it drives the
@@ -1591,7 +1594,9 @@ export class Visualizer {
       this.fillMode(this.modeA, this.uAVals);
       this.divSpin = 0;
       this.divSpin2 = 0;
-      this.divWorld = 0;
+      this.divWorld = Math.PI / 2; // start on a L/R-symmetric angle
+      this.divWorldFrom = this.divWorld;
+      this.divWorldTo = this.divWorld;
       this.divWorldDir = Math.random() < 0.5 ? -1 : 1;
       this.divBaseSeg = [4, 5, 6, 6, 8][Math.floor(Math.random() * 5)];
       this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 1 , bloomType: 2, radSeg: 6, seam: 0 };
@@ -1856,6 +1861,24 @@ export class Visualizer {
    *  clean axis-aligned grids/quads. Spin is LOW (occasional, not constant — the
    *  evolution comes from the morphing transitions, not from spinning). All
    *  strictly symmetric; grid seams stay H/V (shader passes worldRot=0). */
+  /** Number of L/R-symmetric rotation positions per π for a pose (its mirror
+   *  lines sit every π/N; a vertical mirror = L/R-symmetric screen). */
+  private divSymN(p: DivPose): number {
+    return p.bloomType > 1.5 ? Math.max(2, p.radSeg)   // radial
+         : p.bloomType > 0.5 ? 3                        // triangle (p6m)
+         : Math.max(2, this.divBaseSeg);                // grid → radial base
+  }
+
+  /** Pick the worldRot DESTINATION for a leg: continue turning from the current
+   *  angle by ~`turn` radians, then snap to the nearest L/R-symmetric angle for
+   *  pose `p` (rot ≡ π/2 mod π/N). Returns an absolute target we ease straight to
+   *  — so it ends exactly square, no drift-then-correct. */
+  private divWorldTarget(p: DivPose, turn: number): number {
+    const step = Math.PI / this.divSymN(p);
+    const want = this.divWorld + turn * this.divWorldDir;
+    return Math.round((want - Math.PI / 2) / step) * step + Math.PI / 2;
+  }
+
   private randomRadialBloom(): DivPose {
     const r = Math.random;
     // low, often near-zero spin so it doesn't get dizzying; occasionally livelier
@@ -1979,6 +2002,13 @@ export class Visualizer {
           this.divHold = 4 + Math.random() * 5;
           this.divAtBloom = true;
         }
+        // worldRot leg: decide the destination NOW and ease straight to it, so it
+        // lands exactly on a L/R-symmetric angle (radial) — no drift-then-snap.
+        // turn ~ a third to a full turn so it visibly rotates while travelling.
+        this.divWorldFrom = this.divWorld;
+        this.divWorldTo = this.divIsRadial
+          ? this.divWorldTarget(this.divTo, 1.0 + Math.random() * 2.6)
+          : this.divWorld; // grid/triangle non-radial modes: handled elsewhere
         this.divT = 0;
       }
     }
@@ -2009,35 +2039,16 @@ export class Visualizer {
       }
     }
     this.divSpin += dt * cur.spin * TAU;        // ONE shared spin phase (coherent)
-    // (3) WHOLE-SCREEN ROTATION with AXIS DWELL: rotate more, but slow down (dwell)
-    // when seams are axis-aligned (worldRot near a multiple of 90°), where the
-    // composition looks strongest. axisGate → ~0 at 0/90/180/270°, 1 between.
-    // The "turning the kaleidoscope" feel lives HERE: rotation is strong DURING
-    // transitions (transFlux) and nearly stops at rest (low base) — so the
-    // design evolves/turns as it morphs, rather than a constant dizzying spin.
-    // axisGate slows it further as seams approach axis-aligned (H/V dwell).
-    const a4 = this.divWorld * 2.0;
-    const axisGate = (1.0 - Math.cos(a4 * 2.0)) * 0.5; // 0 at axis, 1 mid
-    const transFlux = (this.divT > 0 && this.divT < 1) ? Math.sin(this.divT * Math.PI) : 0;
-    const baseRate = 0.012 + this.autoEnergy * 0.04;  // gentle idle drift
-    const turnRate = transFlux * 0.9;                  // strong turn while morphing
-    const rotRate = (baseRate + turnRate) * (0.18 + 0.82 * axisGate);
-    // SETTLE-SNAP: while a radial-mode bloom is at REST, OVERRIDE the idle drift
-    // and ease worldRot to the nearest LEFT-RIGHT-symmetric orientation so the
-    // pause is never tilted. An N-fold radial's mirror lines sit every π/N; one
-    // is vertical (→ L/R symmetric screen) at rot ≡ π/2 (mod π/N). During a
-    // transition we rotate freely (the turn); only snap when settled (divT≥1).
-    const settled = this.divIsRadial && this.divT >= 1;
-    if (settled) {
-      const N = cur.bloomType > 1.5 ? Math.max(2, cur.radSeg)   // radial: radSeg
-              : cur.bloomType > 0.5 ? 3                          // triangle p6m: π/3
-              : Math.max(2, this.divBaseSeg);                    // grid: radial base
-      const step = Math.PI / N;
-      const target = Math.round((this.divWorld - Math.PI / 2) / step) * step + Math.PI / 2;
-      // strong ease, NO idle drift while settling → it actually lands square
-      this.divWorld += (target - this.divWorld) * (1 - Math.exp(-dt * 3.0));
+    // WHOLE-SCREEN ROTATION. In radial mode worldRot is an EASED POSE PARAM like
+    // everything else: each leg sets divWorldFrom→divWorldTo (target chosen up
+    // front to land on a L/R-symmetric angle) and we ease straight there with the
+    // SAME m curve — one smooth motion that turns AND arrives square, no separate
+    // drift+snap. Non-radial divide/split keep a continuous free spin.
+    if (this.divIsRadial) {
+      this.divWorld = L(this.divWorldFrom, this.divWorldTo);
     } else {
-      this.divWorld += dt * rotRate * this.divWorldDir;
+      const transFlux = (this.divT > 0 && this.divT < 1) ? Math.sin(this.divT * Math.PI) : 0;
+      this.divWorld += dt * (0.05 + transFlux * 0.6 + this.autoEnergy * 0.06) * this.divWorldDir;
     }
     // gentle continuous orbit for the "centers circling each other" bloom (bt1)
     this.divOrbit += dt * (0.10 + this.autoEnergy * 0.08) * this.divWorldDir;
