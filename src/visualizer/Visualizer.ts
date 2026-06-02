@@ -1215,7 +1215,7 @@ export class Visualizer {
     this.initParticles();
     this.initPasses();
     this.fillMode(this.modeA, this.uAVals); // seed set A with the initial mode
-    this.setPalette(0, true);
+    this.setPalette(this.paletteIndex, true); // honor the default palette (Magma)
     this.resize();
 
     window.addEventListener("resize", this.resize);

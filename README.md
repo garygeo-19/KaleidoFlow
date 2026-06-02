@@ -14,8 +14,7 @@ hard, reactive look of classic spectrum visualizers.
 > Built with React + Three.js (plain WebGL, no react-three-fiber) and a GPGPU
 > particle simulation. No build-time assets beyond a bundled demo track.
 
-<!-- Add a screenshot/gif here once the repo is public, e.g.:
-![KaleidoFlow](docs/screenshot.png) -->
+![KaleidoFlow — the evolving-symmetry mode](docs/img/01-evolving-symmetry.jpg)
 
 ---
 
@@ -69,6 +68,19 @@ their own and react to the music.
 | **evolving surface** | Symmetry lives in the **force field** (N evenly-spaced swirl sources) rather than a post fold — a "water surface" where particles bubble up and sink. |
 | **evolving morph** | A continuous N-fold dihedral morph journey (the original symmetry engine), exploring point counts 4–16. |
 | **evolving pinwheel** | Rotational (cyclic) symmetry with **no mirror seams** — reads more like a spiral/pinwheel. |
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/02-evolving-morph.jpg" alt="evolving morph" width="100%"><br><sub><b>evolving morph</b> · Aurora</sub></td>
+    <td align="center"><img src="docs/img/03-evolving-pinwheel.jpg" alt="evolving pinwheel" width="100%"><br><sub><b>evolving pinwheel</b> · Ice</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/img/04-evolving-surface.jpg" alt="evolving surface" width="100%"><br><sub><b>evolving surface</b> · Ember</sub></td>
+    <td align="center"><img src="docs/img/01-evolving-symmetry.jpg" alt="evolving symmetry" width="100%"><br><sub><b>evolving symmetry</b> · Magma</sub></td>
+  </tr>
+</table>
+
+*(Stills from the bundled demo track. The palette — Magma, Aurora, Ice, Ember… — is cycled live with `P`.)*
 
 ## Controls
 
