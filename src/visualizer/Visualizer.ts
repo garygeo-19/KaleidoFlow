@@ -40,7 +40,7 @@ const KALEIDO_MODES: KaleidoMode[] = [
   { name: "surface", kind: -1, ...K0, auto: "surface" },
   { name: "auto · symmetry", kind: -1, ...K0, auto: "symmetry" },
   { name: "auto · divide", kind: -1, ...K0, auto: "divide" },
-  { name: "auto · divide v2", kind: -1, ...K0, auto: "dividev2" },
+  { name: "auto · split", kind: -1, ...K0, auto: "dividev2" },
   { name: "auto · pinwheel", kind: -1, ...K0, auto: "pinwheel" },
   { name: "auto · music", kind: -1, ...K0, auto: "music" },
   { name: "auto · flow", kind: -1, ...K0, auto: "cycle" },
@@ -162,6 +162,9 @@ type DivPose = {
   dx: number; dy: number;
   kx: number; ky: number;
   spin: number; swirl: number;
+  // symCells (auto · split) extras: layout 0=grid/1=ring; nx/ny axis divisions
+  // (grid) or ring point count (nx); seg = rosette fold per focal point
+  layout: number; nx: number; ny: number; seg: number;
 };
 
 // SURFACE (water) mode pose: N swirl SOURCES on a ring in the flow field. The
@@ -790,49 +793,66 @@ const displayFrag = /* glsl */ `
     return q + 0.5;
   }
 
-  // signed cell-local coordinate: returns x relative to the NEAREST center, and
-  // writes that center + an integer cell id. (Signed, unlike fold1D's distance —
-  // needed so each cell can truly ROTATE rather than just mirror.)
-  float cellLocal(float x, float d, float keep, out float center, out float idx) {
-    float a = abs(x), s = sign(x);
-    center = s * d; idx = s;                 // bisect: nearest of ±d
-    if (keep > 0.5 && a < d * 0.5) { center = 0.0; idx = 0.0; } // trisect keeps mid
-    return x - center;
+  // a spinning radial-kaleido rosette around center c (each focal point looks
+  // like its own little kaleidoscope). spinPhase is SHARED across all centers so
+  // the rosettes stay identical = symmetric copies, no fragmentation.
+  vec2 rosette(vec2 uv, vec2 c, float segPerPoint, float spinPhase, float swirl) {
+    vec2 q = uv - c;
+    float r = length(q);
+    float a = atan(q.y, q.x) + spinPhase + swirl * r;
+    float seg_a = TAU / max(segPerPoint, 1.0);
+    a = mod(a, seg_a);
+    a = abs(a - seg_a * 0.5);
+    return c + r * vec2(cos(a), sin(a));
   }
 
-  float hash2i(float a, float b) {
-    return fract(sin(a * 12.9898 + b * 78.233) * 43758.5453);
-  }
-
-  // DIVIDE v2: each focal cell rotates on ITS OWN, not around one global center.
-  // Cell-local coords are signed; each cell blends between two globally-accumulated
-  // spin phases (gPhase / gPhase2, often opposite directions) by a per-cell hash.
-  // The per-cell DIFFERENCE is gated by how far the cells have separated (gate=0
-  // at d≈0), so at consolidation every cell shares one rotation (smooth/continuous)
-  // and as they divide & move apart each brings in its own spin.
-  vec2 divideMoveV2(vec2 uv, float aspect, float dx, float dy, float kx, float ky,
-                    float gPhase, float gPhase2, float swirl, float localSeg) {
+  // SYM CELLS — generalizes symSplit to 2/3/4/9 + orbital rings, ALL exact
+  // mirror-symmetric copies (each focal point is the SAME spinning rosette), so
+  // the frame stays coherent (no per-cell fragmentation). Two layouts:
+  //   layout 0 = GRID: abs()-fold into a cell whose origin is at (dx,dy). nx,ny
+  //     pick 1/2/3 divisions per axis → 1,2,4,6,9 grids (signed-distance fold,
+  //     so every cell is a true mirror copy). dx/dy=0 ⇒ consolidated (count can
+  //     change invisibly), matching the smooth-transition rule.
+  //   layout 1 = RING: N points evenly on a ring of radius dx (3=triangle, etc.)
+  //     via an angular fold; ringRot orbits the whole ring. Perfectly N-fold.
+  // spinPhase (shared) spins every rosette together; swirl twists arms.
+  vec2 symCells(vec2 uv, float aspect, float lyt, float nAxisX, float nAxisY,
+                float dx, float dy, float ringRot, float spinPhase, float swirl,
+                float segPerPoint) {
     vec2 p = uv - 0.5;
     p.x *= aspect;
-    float cx, ix, cy, iy;
-    float lx = cellLocal(p.x, dx, kx, cx, ix);
-    float ly = cellLocal(p.y, dy, ky, cy, iy);
-    // per-cell rotation: pick how much of gPhase2 vs gPhase this cell follows,
-    // gated so the difference vanishes when consolidated (no boundary jump there).
-    float sel = step(0.5, hash2i(ix + 3.0, iy - 2.0));     // 0 or 1 per cell
-    float gate = smoothstep(0.0, 0.10, max(dx, dy));
-    float phase = gPhase + (gPhase2 - gPhase) * sel * gate;
-    float cs = cos(phase), sn = sin(phase);
-    vec2 lr = mat2(cs, -sn, sn, cs) * vec2(lx, ly);        // rotate cell-locally
-    // inner rotational fold (mod, seamless) for some symmetry within each cell
-    float rr = length(lr);
-    float aa = atan(lr.y, lr.x) + swirl * rr;
-    float lseg = TAU / max(localSeg, 1.0);
-    aa = mod(aa, lseg);
-    lr = rr * vec2(cos(aa), sin(aa));
-    vec2 q = vec2(cx, cy) + lr;
-    q.x /= aspect;
-    return q + 0.5;
+    if (lyt < 0.5) {
+      // GRID: per-axis symmetric fold to the nearest of the axis centers.
+      // nAxisX=1 → center {0}; =2 → {-dx,+dx} (bisect); =3 → {-dx,0,+dx} (trisect)
+      float cx = 0.0, cy = 0.0;
+      if (nAxisX >= 1.5) {
+        float a = abs(p.x);
+        cx = (nAxisX >= 2.5 && a < dx * 0.5) ? 0.0 : sign(p.x) * dx;
+      }
+      if (nAxisY >= 1.5) {
+        float a = abs(p.y);
+        cy = (nAxisY >= 2.5 && a < dy * 0.5) ? 0.0 : sign(p.y) * dy;
+      }
+      vec2 c = vec2(cx, cy);
+      vec2 q = rosette(p, c, segPerPoint, spinPhase, swirl);
+      q.x /= aspect;
+      return q + 0.5;
+    } else {
+      // RING: fold the plane into one of N angular wedges, each holding a copy of
+      // the SAME rosette sitting at radius dx on the wedge centerline → N points
+      // evenly on a ring. abs-fold within the wedge keeps mirror symmetry.
+      float N = max(nAxisX, 1.0);
+      float r = length(p);
+      float ang = atan(p.y, p.x) - ringRot;        // orbit the whole ring
+      float seg = TAU / N;
+      ang = mod(ang, seg);
+      ang = abs(ang - seg * 0.5);                   // mirror within wedge
+      vec2 pf = r * vec2(cos(ang), sin(ang));
+      vec2 c = vec2(dx, 0.0);                        // focal point on wedge centerline
+      vec2 q = rosette(pf, c, segPerPoint, spinPhase, swirl);
+      q.x /= aspect;
+      return q + 0.5;
+    }
   }
 
   // dispatch one parameter set to its kaleidoscope mapping
@@ -867,11 +887,13 @@ const displayFrag = /* glsl */ `
     // DIVIDE-AND-MOVE: a single continuous fold (no crossfade, no fade) — the
     // journey eases dx/dy/kx/ky so points divide and slide apart / merge back.
     // uA slots: dx=uA[10], dy=uA[12], kx=uA[5], ky=uA[6], spinPhase=uA[4], swirl=uA[7]
-    // uDivide: 1 = v1 (one global rotation), 2 = v2 (each cell rotates its own,
-    //   gPhase2=uA[11], localSeg=uA[1]).
+    // uDivide: 1 = v1 (divide-and-move, one global rotation); 2 = symCells
+    //   (symmetric multi-rosette: grid/ring, each focal point a shared-phase
+    //    spinning rosette). v2 slots: layout=uA[2], nAxisX=uA[5], nAxisY=uA[6],
+    //    dx=uA[10], dy=uA[12], ringRot=uA[11], spinPhase=uA[4], swirl=uA[7], seg=uA[1]
     if (uDivide > 0.5) {
       vec2 uv = uDivide > 1.5
-        ? divideMoveV2(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[11], uA[7], uA[1])
+        ? symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1])
         : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[4], uA[7]);
       col = texture2D(tTrail, uv).rgb;
       col *= uExposure;
@@ -1030,9 +1052,9 @@ export class Visualizer {
   private symOldSeg = 6; // previous (A) regional fold
   private symStructMix = 1; // 0→1 crossfade of A(old)→B(new) structure (1 = settled)
   // divide-and-move journey driver (pure continuous, no crossfade)
-  private divFrom: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
-  private divTo: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
-  private divCur: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0 };
+  private divFrom: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
+  private divTo: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
+  private divCur: DivPose = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0, swirl: 0, layout: 0, nx: 1, ny: 1, seg: 6 };
   private divT = 1;
   private divHold = 0;
   private divMoveDur = 4;
@@ -1408,7 +1430,7 @@ export class Visualizer {
       this.fillMode(this.modeA, this.uAVals);
       this.divSpin = 0;
       this.divSpin2 = 0;
-      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4 };
+      this.divFrom = { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.05, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 6 };
       this.divCur = { ...this.divFrom };
       this.divTo = this.divFrom;
       this.divAtBloom = false; // first update opens into a bloom
@@ -1605,15 +1627,13 @@ export class Visualizer {
     this.displayMat.uniforms.uMix.value = mix;
   }
 
-  /** Roll a fresh divide-and-move bloom: choose, per axis, whether it splits at
-   *  all and bisect vs trisect, plus spreads + motion. Gives 1/2/3 per axis →
-   *  counts 1,2,3,4,6,9 (and visually 8/16 via larger spreads feel). */
+  /** Roll a fresh divide-and-move bloom (v1): per-axis split + bisect/trisect →
+   *  counts 1,2,3,4,6,9. */
   private randomDivBloom(): DivPose {
     const r = Math.random;
-    // each axis: 0 = no split (single), else split with bisect/trisect
-    const splitX = r() < 0.85; // x almost always splits (so it's not just vertical)
+    const splitX = r() < 0.85;
     const splitY = r() < 0.7;
-    const kx = splitX && r() < 0.45 ? 1 : 0; // trisect ~45% when splitting
+    const kx = splitX && r() < 0.45 ? 1 : 0;
     const ky = splitY && r() < 0.45 ? 1 : 0;
     return {
       dx: splitX ? 0.18 + r() * 0.16 : 0,
@@ -1621,7 +1641,38 @@ export class Visualizer {
       kx, ky,
       spin: (0.03 + r() * 0.10) * (r() < 0.5 ? -1 : 1),
       swirl: 0.4 + r() * 1.8,
+      layout: 0, nx: 1, ny: 1, seg: 6,
     };
+  }
+
+  /** Roll a fresh SPLIT bloom (v2 = symCells): symmetric multi-rosette. Picks a
+   *  GRID (3 as a row, 4=2×2, 6=2×3, 9=3×3) or a RING (3=triangle, 5/6/8 ring),
+   *  per user: 3 as triangle (ring), 9 as 3×3 grid. Each focal point is a
+   *  shared-phase spinning rosette → exact symmetric copies, coherent. */
+  private randomSplitBloom(): DivPose {
+    const r = Math.random;
+    const seg = [3, 4, 6][Math.floor(r() * 3)];           // rosette fold per point
+    const spin = (0.04 + r() * 0.10) * (r() < 0.5 ? -1 : 1);
+    const swirl = 0.4 + r() * 1.6;
+    const ring = r() < 0.45; // ~45% ring (triangles/orbital), else grid
+    if (ring) {
+      const N = [3, 3, 5, 6, 8][Math.floor(r() * 5)];     // triangle-weighted
+      const dx = 0.20 + r() * 0.10;
+      return { dx, dy: 0, kx: 0, ky: 0, spin, swirl, layout: 1, nx: N, ny: 1, seg };
+    } else {
+      // grid: nx,ny ∈ {1,2,3}; bias to give 2×2, 3×3, 2×3
+      const nx = [2, 2, 3][Math.floor(r() * 3)];
+      const ny = [2, 3, 3][Math.floor(r() * 3)];
+      const dx = nx === 1 ? 0 : 0.17 + r() * 0.10;
+      const dy = ny === 1 ? 0 : 0.16 + r() * 0.10;
+      return { dx, dy, kx: 0, ky: 0, spin, swirl, layout: 0, nx, ny, seg };
+    }
+  }
+
+  /** Consolidated center pose for split mode (everything collapsed). */
+  private splitCenterPose(carry: DivPose): DivPose {
+    return { dx: 0, dy: 0, kx: 0, ky: 0, spin: 0.04, swirl: 0.4,
+             layout: carry.layout, nx: carry.nx, ny: carry.ny, seg: carry.seg };
   }
 
   /** Divide-and-move journey. Eases a DivPose between CENTER (all spreads 0, one
@@ -1646,15 +1697,17 @@ export class Visualizer {
       if (this.divHold <= 0) {
         this.divFrom = { ...this.divCur };
         if (this.divAtBloom) {
-          // collapse back to center (all spreads → 0). kx/ky carry over; they’ll
-          // be reset by the next bloom while consolidated (invisible).
-          this.divTo = { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4 };
+          // collapse to center (spreads → 0). layout/nx/ny/seg carry; the next
+          // bloom resets them while consolidated (invisible since dx=dy=0).
+          this.divTo = this.divIsV2
+            ? this.splitCenterPose(this.divCur)
+            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: 6 };
           this.divMoveDur = 3.5 + Math.random() * 2.5;
           this.divHold = 2.5 + Math.random() * 4;
           this.divAtBloom = false;
         } else {
-          // at center: pick the next bloom (its kx/ky take effect now, at d=0)
-          this.divTo = this.randomDivBloom();
+          // at center: pick the next bloom (its structure takes effect now, at d=0)
+          this.divTo = this.divIsV2 ? this.randomSplitBloom() : this.randomDivBloom();
           this.divMoveDur = 4 + Math.random() * 3;
           this.divHold = 4 + Math.random() * 5;
           this.divAtBloom = true;
@@ -1667,21 +1720,24 @@ export class Visualizer {
     const L = (x: number, y: number) => x + (y - x) * m;
     const f = this.divFrom, g = this.divTo, cur = this.divCur;
     cur.dx = L(f.dx, g.dx); cur.dy = L(f.dy, g.dy);
-    // kx/ky: snap to the target's value (only matters at d>0, and we only leave
-    // center INTO a bloom whose k is already set, so this is continuous in effect)
-    cur.kx = g.kx; cur.ky = g.ky;
     cur.spin = L(f.spin, g.spin); cur.swirl = L(f.swirl, g.swirl);
-    this.divSpin += dt * cur.spin * TAU;
-    // v2: a second phase spinning the OTHER way (and a bit faster) so some cells
-    // counter-rotate. Accumulated, so the rate easing never causes a jump.
-    this.divSpin2 -= dt * (Math.abs(cur.spin) * 1.3 + 0.04) * TAU;
+    // discrete structure: snap to target (only differs at d≈0 → invisible swap)
+    cur.kx = g.kx; cur.ky = g.ky;
+    cur.layout = g.layout; cur.nx = g.nx; cur.ny = g.ny; cur.seg = g.seg;
+    this.divSpin += dt * cur.spin * TAU;        // ONE shared spin phase (coherent)
 
     const u = this.uAVals;
     u[0] = 0; // not a symMorph kind; the uDivide branch reads slots directly
-    u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-    u[4] = this.divSpin; u[7] = cur.swirl;
-    u[11] = this.divSpin2; // v2 second per-cell spin phase
-    u[1] = this.divIsV2 ? 4 : 6; // v2 inner localSeg per cell
+    if (this.divIsV2) {
+      // symCells slots: layout=uA[2], nx=uA[5], ny=uA[6], dx=uA[10], dy=uA[12],
+      // ringRot=uA[11], spinPhase=uA[4], swirl=uA[7], seg=uA[1]
+      u[2] = cur.layout; u[5] = cur.nx; u[6] = cur.ny;
+      u[10] = cur.dx; u[12] = cur.dy; u[11] = this.divSpin * 0.4; // ring orbits slower
+      u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
+    } else {
+      u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
+      u[4] = this.divSpin; u[7] = cur.swirl; u[1] = 6;
+    }
   }
 
   /** Toggle the water-surface simulation (symmetry in the force field). When on,
