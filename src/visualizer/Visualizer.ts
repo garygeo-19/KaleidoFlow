@@ -804,6 +804,41 @@ const displayFrag = /* glsl */ `
     return q + 0.5;
   }
 
+  // TRIANGLE (and any N-point) via SOFT-BLENDED focal points — no hard fold, so
+  // NO strong seams (unlike an angular mirror fold). nPts points sit evenly on a
+  // ring of radius rad; each contributes a spun/translated sample, blended by
+  // smooth exp(-dist*sharp) weights → a merged, seamless field. rad=0 ⇒ all
+  // points coincide at center (collapses to one) so it merges/blooms naturally.
+  // worldRot orbits the whole ring.
+  vec2 triPoints(vec2 uv, float aspect, float nPts, float rad, float worldRot,
+                 float spinPhase, float swirl, float sharp) {
+    vec2 p = uv - 0.5;
+    p.x *= aspect;
+    vec2 acc = vec2(0.0);
+    float wsum = 0.0;
+    float cs = cos(spinPhase), sn = sin(spinPhase);
+    mat2 rot = mat2(cs, -sn, sn, cs);
+    for (int k = 0; k < 9; k++) {
+      if (float(k) >= nPts) break;
+      float ang = worldRot + TAU * float(k) / nPts + PI * 0.5; // +90° → point up
+      vec2 c = rad * vec2(cos(ang), sin(ang));
+      vec2 lp = p - c;
+      float d = length(lp);
+      float w = exp(-d * sharp);
+      // local spin + radial swirl, then translate back to the point
+      float rr = length(lp);
+      float aa = atan(lp.y, lp.x) + swirl * rr;
+      vec2 sp = rr * vec2(cos(aa), sin(aa));
+      sp = rot * sp;
+      acc += (c + sp) * w;
+      wsum += w;
+    }
+    if (wsum < 1e-4) return uv;
+    vec2 q = acc / wsum;
+    q.x /= aspect;
+    return q + 0.5;
+  }
+
   // a spinning radial-kaleido rosette around center c (each focal point looks
   // like its own little kaleidoscope). spinPhase is SHARED across all centers so
   // the rosettes stay identical = symmetric copies, no fragmentation.
@@ -904,10 +939,18 @@ const displayFrag = /* glsl */ `
     //    dx=uA[10], dy=uA[12], ringRot=uA[11], spinPhase=uA[4], swirl=uA[7], seg=uA[1]
     if (uDivide > 0.5) {
       // v1 divide slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4,
-      //   swirl=7, innerSeg=1
-      vec2 uv = uDivide > 1.5
-        ? symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1])
-        : divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+      //   swirl=7, innerSeg=1. uA[3] = triangle/ring point count (0 ⇒ grid).
+      // grid and triangle both collapse to one point at center, so switching
+      // which fold runs (committed at consolidation) is invisible — no seam.
+      vec2 uv;
+      if (uDivide > 1.5) {
+        uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
+      } else if (uA[3] > 2.5) {
+        // triangle/ring: rad=uA[10], worldRot=uA[11], spin=uA[4], swirl=uA[7], sharp=uA[1]
+        uv = triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1]);
+      } else {
+        uv = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+      }
       col = texture2D(tTrail, uv).rgb;
       col *= uExposure;
       col = col / (col + vec3(1.0));
@@ -1644,10 +1687,23 @@ export class Visualizer {
     this.displayMat.uniforms.uMix.value = mix;
   }
 
-  /** Roll a fresh divide-and-move bloom (v1): per-axis split + bisect/trisect →
-   *  counts 1,2,3,4,6,9. */
+  /** Roll a fresh divide-and-move bloom (v1): grid (per-axis split + bisect/
+   *  trisect → 1,2,3,4,6,9) OR — ~30% — a soft-blended TRIANGLE/ring (3/5/6
+   *  points, seamless, orbiting). nx carries the triangle point count (0=grid). */
   private randomDivBloom(): DivPose {
     const r = Math.random;
+    if (r() < 0.3) {
+      // TRIANGLE / ring bloom (seamless soft points). nx = point count.
+      const N = [3, 3, 3, 5, 6][Math.floor(r() * 5)]; // triangle-weighted
+      return {
+        dx: 0.22 + r() * 0.10,   // ring radius
+        dy: 0, kx: 0, ky: 0,
+        spin: (0.05 + r() * 0.16) * (r() < 0.5 ? -1 : 1),
+        swirl: 0.3 + r() * 1.6,
+        layout: 0, nx: N, ny: 1,
+        seg: 4.5 + r() * 4.0,    // blend sharpness (seamless softness)
+      };
+    }
     const splitX = r() < 0.85;
     const splitY = r() < 0.7;
     const kx = splitX && r() < 0.45 ? 1 : 0;
@@ -1662,7 +1718,7 @@ export class Visualizer {
       // more spin than before (was 0.03..0.13) → livelier cells
       spin: (0.06 + r() * 0.20) * (r() < 0.5 ? -1 : 1),
       swirl: 0.4 + r() * 2.2,
-      layout: 0, nx: 1, ny: 1, seg: innerSeg,
+      layout: 0, nx: 0, ny: 1, seg: innerSeg,  // nx=0 ⇒ grid
     };
   }
 
@@ -1722,7 +1778,7 @@ export class Visualizer {
           // resets it while consolidated (invisible since dx=dy=0).
           this.divTo = this.divIsV2
             ? this.splitCenterPose(this.divCur)
-            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: 1, ny: 1, seg: this.divCur.seg };
+            : { dx: 0, dy: 0, kx: this.divCur.kx, ky: this.divCur.ky, spin: 0.04, swirl: 0.4, layout: 0, nx: this.divCur.nx, ny: 1, seg: this.divCur.seg };
           this.divMoveDur = 3.5 + Math.random() * 2.5;
           this.divHold = 2.5 + Math.random() * 4;
           this.divAtBloom = false;
@@ -1763,9 +1819,11 @@ export class Visualizer {
       u[10] = cur.dx; u[12] = cur.dy; u[11] = this.divSpin * 0.4; // ring orbits slower
       u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
     } else {
-      // v1 slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4, swirl=7, innerSeg=1
+      // v1 slots: dx=10, dy=12, kx=5, ky=6, worldRot=11, spinPhase=4, swirl=7,
+      // innerSeg/sharp=1, triCount=3 (0 ⇒ grid; ≥3 ⇒ seamless triangle/ring)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-      u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl; u[1] = cur.seg;
+      u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl;
+      u[1] = cur.seg; u[3] = cur.nx;
     }
   }
 
