@@ -1100,15 +1100,15 @@ export class Visualizer {
 
   // palette crossfade state (current coeffs lerp toward target coeffs)
   // how fast the flow field's vector directions evolve over time
-  private fieldSpeed = 0.06;
+  private fieldSpeed = 0.99;
   // particle breathing: cycle rate + peak size (px). min stays 1.
-  private breatheRate = 0.6;
-  private breathePeak = 4;
+  private breatheRate = 0.15;
+  private breathePeak = 5;
   // base brightness; music modulates around it
   private intensity = 0.4;
   // seam treatment + trail roundness (live-tunable via keys)
   private seamSoft = 0.6;
-  private trailBlur = 0.0;
+  private trailBlur = 0.5;
 
   // kaleidoscope crossfade: uAVals shown when mix==0, dissolving toward uBVals.
   private uAVals: number[] = new Array(15).fill(0);
@@ -1182,7 +1182,7 @@ export class Visualizer {
   // optional music reactivity
   private audioEl: HTMLAudioElement | null = null;
   private flow: FlowPlayer | null = null;
-  private paletteIndex = 0;
+  private paletteIndex = Math.max(0, PALETTES.findIndex((p) => p.name === "Magma"));
   private paletteTimer = 0;
   private curA = new THREE.Vector3();
   private curB = new THREE.Vector3();
