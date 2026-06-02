@@ -960,8 +960,10 @@ const displayFrag = /* glsl */ `
         int bt = int(uA[8] + 0.5);
         vec2 folded;
         if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
-        else if (bt == 1) folded = triPoints(vUv, aspect, uA[3], uA[10], uA[11], uA[4], uA[7], uA[1]);
-        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], uA[11], uA[4], uA[7], uA[1]);
+        // GRID bloom: pass worldRot=0 so the fold seams stay axis-aligned
+        // (horizontal/vertical), never diagonal. The whole-field swing still
+        // lives in the radial base + spin; the grid itself stays square.
+        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], 0.0, uA[4], uA[7], uA[1]);
         uv = mix(baseR, folded, seam);
       } else if (uDivide > 1.5) {
         uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
@@ -1787,6 +1789,38 @@ export class Visualizer {
     };
   }
 
+  /** Roll a fresh bloom for auto · radial. RADIAL-DOMINANT and strictly
+   *  symmetric — no soft triangles (those read distorted), no asymmetric grids.
+   *  ~70% radial (with lively spin), ~30% a clean axis-aligned grid/quad whose
+   *  seams stay horizontal/vertical (worldRot is forced to 0 for grids in the
+   *  shader). Grids always split BOTH axes (balanced 2×2 / quad / 3×3). */
+  private randomRadialBloom(): DivPose {
+    const r = Math.random;
+    if (r() < 0.7) {
+      // RADIAL bloom — true central radial, higher fold, MORE spin
+      const N = [5, 6, 8, 8, 10, 12, 16][Math.floor(r() * 7)];
+      return {
+        dx: 0, dy: 0, kx: 0, ky: 0,
+        spin: (0.10 + r() * 0.18) * (r() < 0.5 ? -1 : 1), // livelier radial spin
+        swirl: 0, layout: 0, nx: 0, ny: 1, seg: 1,
+        bloomType: 2, radSeg: N, seam: 1.0,
+      };
+    }
+    // CLEAN GRID/QUAD — both axes split (balanced), bisect or trisect per axis
+    const kx = r() < 0.4 ? 1 : 0;
+    const ky = r() < 0.4 ? 1 : 0;
+    const innerSeg = r() < 0.5 ? [2, 4, 6][Math.floor(r() * 3)] : 1;
+    return {
+      dx: 0.18 + r() * 0.14,
+      dy: 0.18 + r() * 0.14,
+      kx, ky,
+      spin: (0.05 + r() * 0.12) * (r() < 0.5 ? -1 : 1),
+      swirl: 0.3 + r() * 1.2,
+      layout: 0, nx: 0, ny: 1, seg: innerSeg,
+      bloomType: 0, radSeg: 6, seam: 1.0,
+    };
+  }
+
   /** Roll a fresh SPLIT bloom (v2 = symCells): symmetric multi-rosette. Picks a
    *  GRID (3 as a row, 4=2×2, 6=2×3, 9=3×3) or a RING (3=triangle, 5/6/8 ring),
    *  per user: 3 as triangle (ring), 9 as 3×3 grid. Each focal point is a
@@ -1860,7 +1894,9 @@ export class Visualizer {
         } else {
           // at home: pick the next bloom (its structure takes effect here, where
           // seam is low and any structure looks alike → invisible swap)
-          this.divTo = this.divIsV2 ? this.randomSplitBloom() : this.randomDivBloom();
+          this.divTo = this.divIsV2 ? this.randomSplitBloom()
+            : this.divIsRadial ? this.randomRadialBloom()
+            : this.randomDivBloom();
           if (Math.random() < 0.4) this.divWorldDir *= -1;
           this.divMoveDur = 4 + Math.random() * 3;
           this.divHold = 4 + Math.random() * 5;
@@ -1918,7 +1954,11 @@ export class Visualizer {
       // innerSeg/sharp=1, count=3 (triangle pts OR radial segs by bloomType),
       // seam=2, bloomType=8 (0 grid, 1 triangle, 2 radial)
       u[10] = cur.dx; u[12] = cur.dy; u[5] = cur.kx; u[6] = cur.ky;
-      u[11] = this.divWorld; u[4] = this.divSpin; u[7] = cur.swirl;
+      // radial mode: drive the radial rotation by worldRot + the (livelier) spin
+      // phase, so the radial base/blooms visibly rotate more. Grid blooms ignore
+      // this (shader passes 0) so their seams stay axis-aligned.
+      u[11] = this.divIsRadial ? (this.divWorld + this.divSpin) : this.divWorld;
+      u[4] = this.divSpin; u[7] = cur.swirl;
       u[1] = cur.seg; u[2] = cur.seam; u[8] = cur.bloomType;
       // uA[3] = count: radial segs (radial), triangle points (triangle), else 0
       u[3] = cur.bloomType > 1.5 ? cur.radSeg : (cur.bloomType > 0.5 ? cur.nx : 0);
