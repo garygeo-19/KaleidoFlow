@@ -59,24 +59,25 @@ solution that made it click:
 
 ## Modes
 
-Pick a mode from the top bar. All four are auto-choreographed — they evolve on
+Pick a mode from the top bar. All five are auto-choreographed — they evolve on
 their own and react to the music.
 
 | Mode | What it is |
 |------|------------|
 | **evolving symmetry** *(default)* | Clean radial home that turns/morphs into radials (square, pentagon, hexagon, octagon…) and axis-aligned **grids/quads** — always at least a **four-way split**, never a lopsided single mirror. The headline mode. |
+| **evolving center-out** | The same radial choreography, but the flow field is an **outward fountain**: particles are born in a tight core at the centre and stream out to the rim, so the motion **bubbles up from the middle and pushes outward** (rather than drifting inward). Reads as continually opening into new territory — handy as a layer in other tools. |
 | **evolving surface** | Symmetry lives in the **force field** (N evenly-spaced swirl sources) rather than a post fold — a "water surface" where particles bubble up and sink. |
 | **evolving morph** | A continuous N-fold dihedral morph journey (the original symmetry engine), exploring point counts 4–16. |
 | **evolving pinwheel** | Rotational (cyclic) symmetry with **no mirror seams** — reads more like a spiral/pinwheel. |
 
 <table>
   <tr>
+    <td align="center"><img src="docs/img/05-evolving-center-out.jpg" alt="evolving center-out" width="100%"><br><sub><b>evolving center-out</b> · Magma</sub></td>
     <td align="center"><img src="docs/img/02-evolving-morph.jpg" alt="evolving morph" width="100%"><br><sub><b>evolving morph</b> · Aurora</sub></td>
-    <td align="center"><img src="docs/img/03-evolving-pinwheel.jpg" alt="evolving pinwheel" width="100%"><br><sub><b>evolving pinwheel</b> · Ice</sub></td>
   </tr>
   <tr>
+    <td align="center"><img src="docs/img/03-evolving-pinwheel.jpg" alt="evolving pinwheel" width="100%"><br><sub><b>evolving pinwheel</b> · Ice</sub></td>
     <td align="center"><img src="docs/img/04-evolving-surface.jpg" alt="evolving surface" width="100%"><br><sub><b>evolving surface</b> · Ember</sub></td>
-    <td align="center"><img src="docs/img/01-evolving-symmetry.jpg" alt="evolving symmetry" width="100%"><br><sub><b>evolving symmetry</b> · Magma</sub></td>
   </tr>
 </table>
 

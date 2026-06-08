@@ -51,6 +51,7 @@ type KaleidoMode = {
   bounceSpeed: number; // bounce: base travel speed of edge-ricocheting centers
   reactive: number; // 1 = music intensity scales the number of active centers
   auto?: "cycle" | "music" | "symmetry" | "surface" | "pinwheel" | "divide" | "dividev2" | "radialdiv"; // special: auto-choreography driver (no own geometry)
+  centerOut?: boolean; // flow fountains OUT from the centre (vs the default inward framing)
 };
 const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, driftSpeed: 0, rotSpeed: 0, segPerPoint: 6, blendSharp: 8, orbitRadius: 0, orbitSpeed: 0, centerPull: 0, bounceSpeed: 0, reactive: 0 };
 // The curated menu — four polished evolving modes. (The shader still contains
@@ -58,6 +59,7 @@ const K0 = { segments: 0, rings: 0, points: 0, bubbleRate: 0, driftAmt: 0, drift
 // trimmed.) "evolving symmetry" is the headline/default.
 const KALEIDO_MODES: KaleidoMode[] = [
   { name: "evolving symmetry", kind: -1, ...K0, auto: "radialdiv" }, // radial home + grids/triangles
+  { name: "evolving center-out", kind: -1, ...K0, auto: "radialdiv", centerOut: true }, // same fold, flow bubbles from the centre outward
   { name: "evolving surface", kind: -1, ...K0, auto: "surface" },    // water flow field
   { name: "evolving morph", kind: -1, ...K0, auto: "symmetry" },     // continuous symMorph journey
   { name: "evolving pinwheel", kind: -1, ...K0, auto: "pinwheel" },  // seamless rotational/spiral
@@ -147,6 +149,7 @@ const velocityFrag = /* glsl */ `
   uniform float uFieldSpeed;
   uniform float uInertia;
   uniform float uCurlStrength;
+  uniform float uCenterOut;   // 0 = inward framing pull; 1 = outward fountain from centre
   // ── surface (water) mode: symmetry lives in the FORCE FIELD ──
   uniform float uSurface;     // 0 = legacy curl, 1 = surface flow
   uniform float uSrcCount;    // N swirl sources on the ring (1..16)
@@ -200,8 +203,20 @@ const velocityFrag = /* glsl */ `
 
     vec3 field = curlNoise(pos * uFieldScale + vec3(0.0, 0.0, uTime * uFieldSpeed));
     field *= uCurlStrength;
-    // gentle pull toward the origin so the swarm stays framed
-    field += -pos * 0.18;
+    // FRAMING term, selected by uCenterOut:
+    //   inward  (0): a gentle pull toward the origin so the swarm stays framed.
+    //   outward (1): a fountain — push radially OUT from the centre, strongest at
+    //     the core and tapering with radius (so particles burst out then coast to
+    //     the rim, where they recycle). A tangential component makes the rotation
+    //     spiral OUTWARD from the centre, so it reads as bubbling up into new
+    //     territory rather than draining inward. z eases back to the plane.
+    float rr = length(pos.xy) + 1e-3;
+    vec2 outDir = pos.xy / rr;
+    vec2 tang = vec2(-outDir.y, outDir.x);
+    float push = 0.85 * exp(-rr * 1.1);
+    vec3 outward = vec3(outDir * push + tang * (0.5 * push), -pos.z * 0.4);
+    vec3 inward = -pos * 0.18;
+    field += mix(inward, outward, uCenterOut);
 
     vel = mix(field, vel, uInertia);
     gl_FragColor = vec4(vel, 1.0);
@@ -213,8 +228,10 @@ const positionFrag = /* glsl */ `
   uniform float uDt;
   uniform float uSpeed;
   uniform float uLifeDecay;
+  uniform float uCenterOut; // 0 = scatter respawn; 1 = reborn in a core, stream out
 
   ${HASH}
+  const float TAU_P = 6.28318530718;
 
   void main() {
     vec2 uv = gl_FragCoord.xy / resolution.xy;
@@ -228,14 +245,21 @@ const positionFrag = /* glsl */ `
     float lifeDecay = uLifeDecay * (0.45 + hash12(uv * 7.13) * 1.6);
     life -= uDt * lifeDecay;
 
-    if (life <= 0.0 || length(pos) > 3.4) {
+    // center-out recycles at a tighter rim so the fountain stays on-screen.
+    float rim = mix(3.4, 1.9, uCenterOut);
+    if (life <= 0.0 || length(pos) > rim) {
       float t = uTime * 0.37;
       vec3 r = vec3(
         hash12(uv + t),
         hash12(uv * 1.7 + t + 11.3),
         hash12(uv * 2.3 + t + 71.9)
       );
-      pos = (r - 0.5) * 2.6;
+      vec3 scatter = (r - 0.5) * 2.6;
+      // center-out: reborn in a small core near the centre → flows outward
+      float ang = r.x * TAU_P;
+      float rad0 = 0.03 + r.y * 0.15;
+      vec3 core = vec3(cos(ang) * rad0, sin(ang) * rad0, (r.z - 0.5) * 0.1);
+      pos = mix(scatter, core, uCenterOut);
       life = 1.0; // reborn at full life; fades in via the size/alpha envelope
     }
 
@@ -1246,6 +1270,7 @@ export class Visualizer {
       uDt: { value: 0.016 },
       uSpeed: { value: 1.0 },
       uLifeDecay: { value: 0.22 },
+      uCenterOut: { value: 0 },
     });
     Object.assign(this.velocityVar.material.uniforms, {
       uTime: { value: 0 },
@@ -1253,6 +1278,7 @@ export class Visualizer {
       uFieldSpeed: { value: this.fieldSpeed },
       uInertia: { value: 0.86 },
       uCurlStrength: { value: 1.0 },
+      uCenterOut: { value: 0 },
       // surface (water) mode
       uSurface: { value: 0 },
       uSrcCount: { value: 3 },
@@ -1449,6 +1475,7 @@ export class Visualizer {
     this.kaleidoIndex = ((index % KALEIDO_MODES.length) + KALEIDO_MODES.length) % KALEIDO_MODES.length;
     const m = KALEIDO_MODES[this.kaleidoIndex];
     this.onModeChange(m.name); // tell the menu which base mode is active
+    this.setCenterOut(!!m.centerOut); // outward fountain only for the center-out mode
     if (m.auto) {
       this.startAuto(m.auto, m.name);
       return;
@@ -2019,6 +2046,13 @@ export class Visualizer {
     this.surfActive = on;
     this.velocityVar.material.uniforms.uSurface.value = on ? 1 : 0;
     this.pointsMat.uniforms.uSurfaceDraw.value = on ? 1 : 0;
+  }
+
+  /** Flip the flow field between inward framing (default) and an outward fountain
+   *  that bubbles up from the centre. Set per-mode in setKaleido. */
+  private setCenterOut(on: boolean) {
+    this.velocityVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
+    this.positionVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
   }
 
   private surfCenterPose(numPoints = 3): SurfPose {
