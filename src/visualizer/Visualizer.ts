@@ -202,19 +202,23 @@ const velocityFrag = /* glsl */ `
     }
 
     vec3 field = curlNoise(pos * uFieldScale + vec3(0.0, 0.0, uTime * uFieldSpeed));
-    field *= uCurlStrength;
+    // center-out leans on the deterministic radial push; damp the curl noise so it
+    // can't shove particles back inward (which would fight the fountain / recirculate).
+    field *= mix(uCurlStrength, uCurlStrength * 0.45, uCenterOut);
     // FRAMING term, selected by uCenterOut:
     //   inward  (0): a gentle pull toward the origin so the swarm stays framed.
-    //   outward (1): a fountain — push radially OUT from the centre, strongest at
-    //     the core and tapering with radius (so particles burst out then coast to
-    //     the rim, where they recycle). A tangential component makes the rotation
-    //     spiral OUTWARD from the centre, so it reads as bubbling up into new
-    //     territory rather than draining inward. z eases back to the plane.
+    //   outward (1): a PURE-RADIAL fountain. The push is strongest at the core and
+    //     tapers, PLUS a constant floor so the radial speed never drops to zero —
+    //     i.e. r increases monotonically and everything streams cleanly to the rim
+    //     (no stalling / recirculation). NO tangential component: radial velocity is
+    //     invariant under the mirror fold (it's parallel to every seam), so there are
+    //     no convergent/divergent seams — each wedge shows identical outward flow,
+    //     and whatever is born at the centre leaves on a clean outward vector.
+    //     z eases back toward the plane to keep the bloom flat.
     float rr = length(pos.xy) + 1e-3;
     vec2 outDir = pos.xy / rr;
-    vec2 tang = vec2(-outDir.y, outDir.x);
-    float push = 0.85 * exp(-rr * 1.1);
-    vec3 outward = vec3(outDir * push + tang * (0.5 * push), -pos.z * 0.4);
+    float push = 0.55 * exp(-rr * 1.1) + 0.30;
+    vec3 outward = vec3(outDir * push, -pos.z * 0.4);
     vec3 inward = -pos * 0.18;
     field += mix(inward, outward, uCenterOut);
 
