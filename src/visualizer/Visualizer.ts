@@ -400,6 +400,7 @@ const displayFrag = /* glsl */ `
   uniform float uSeamSoft;    // 0 = hard mirror seams, 1 = strongly feathered seams
   uniform float uRotational;  // 0 = mirror fold (symMorph), 1 = rotational (rotMorph, no seam)
   uniform float uDivide;      // 1 = divide-and-move fold (auto · divide), uses uA slots
+  uniform float uCenterOut;   // 1 = center-out mode: stretch the fold to fill a wide canvas
   // Two full parameter sets so we can crossfade between any two presets.
   // Layout: 0 kind, 1 segments, 2 rings, 3 points, 4 bubbleRate, 5 driftAmt,
   // 6 driftSpeed, 7 rotSpeed, 8 segPerPoint, 9 blendSharp, 10 orbitRadius,
@@ -976,10 +977,15 @@ const displayFrag = /* glsl */ `
         // base radial seg can swap invisibly at seam 1, and the bloom structure
         // at seam 0 — both directions clean, always consolidates to radial.
         float seam = smoothstep(0.0, 1.0, uA[2]);
-        vec2 baseR = radial(vUv, max(uA[9], 2.0), uA[11], aspect);
+        // center-out fills a landscape canvas: ease the fold's aspect toward 1 so
+        // the (otherwise circular) radial pattern stretches out to the screen edges
+        // instead of leaving black side bars. Original evolving symmetry (uCenterOut
+        // = 0) keeps the true aspect → stays perfectly circular.
+        float faC = mix(aspect, 1.0, uCenterOut);
+        vec2 baseR = radial(vUv, max(uA[9], 2.0), uA[11], faC);
         int bt = int(uA[8] + 0.5);
         vec2 folded;
-        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
+        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], faC);
         // bt 1 = N-fold MORPH (the auto·symmetry triangle): N=uA[3] mirror-
         //   symmetric lobes (each mirrored down its own centerline — GUARANTEED
         //   symmetric, no lopsided blobs), a radial focal point at focusR=uA[10]
@@ -987,11 +993,11 @@ const displayFrag = /* glsl */ `
         // bt 1 = TRIANGLE KALEIDOSCOPE: equilateral-triangle mirror fold whose
         //   seams meet at the three VERTICES (not the center). scale=uA[10],
         //   rot=uA[11] (worldRot+orbit).
-        else if (bt == 1) folded = triKaleido(vUv, aspect, uA[10], uA[11]);
+        else if (bt == 1) folded = triKaleido(vUv, faC, uA[10], uA[11]);
         // GRID bloom: pass worldRot=0 so the fold seams stay axis-aligned
         // (horizontal/vertical), never diagonal. The whole-field swing still
         // lives in the radial base + spin; the grid itself stays square.
-        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], 0.0, uA[4], uA[7], uA[1]);
+        else              folded = divideMove(vUv, faC, uA[10], uA[12], uA[5], uA[6], 0.0, uA[4], uA[7], uA[1]);
         uv = mix(baseR, folded, seam);
       } else if (uDivide > 1.5) {
         uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
@@ -1400,6 +1406,7 @@ export class Visualizer {
         uSeamSoft: { value: 0.6 },
         uRotational: { value: 0 },
         uDivide: { value: 0 },
+        uCenterOut: { value: 0 },
         uA: { value: this.uAVals },
         uB: { value: this.uBVals },
       },
@@ -2057,6 +2064,7 @@ export class Visualizer {
   private setCenterOut(on: boolean) {
     this.velocityVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
     this.positionVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
+    this.displayMat.uniforms.uCenterOut.value = on ? 1 : 0; // fill-the-canvas fold stretch
   }
 
   private surfCenterPose(numPoints = 3): SurfPose {
