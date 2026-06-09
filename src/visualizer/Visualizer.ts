@@ -202,23 +202,22 @@ const velocityFrag = /* glsl */ `
     }
 
     vec3 field = curlNoise(pos * uFieldScale + vec3(0.0, 0.0, uTime * uFieldSpeed));
-    // center-out leans on the deterministic radial push; damp the curl noise so it
-    // can't shove particles back inward (which would fight the fountain / recirculate).
-    field *= mix(uCurlStrength, uCurlStrength * 0.45, uCenterOut);
-    // FRAMING term, selected by uCenterOut:
-    //   inward  (0): a gentle pull toward the origin so the swarm stays framed.
-    //   outward (1): a PURE-RADIAL fountain. The push is strongest at the core and
-    //     tapers, PLUS a constant floor so the radial speed never drops to zero —
-    //     i.e. r increases monotonically and everything streams cleanly to the rim
-    //     (no stalling / recirculation). NO tangential component: radial velocity is
-    //     invariant under the mirror fold (it's parallel to every seam), so there are
-    //     no convergent/divergent seams — each wedge shows identical outward flow,
-    //     and whatever is born at the centre leaves on a clean outward vector.
-    //     z eases back toward the plane to keep the bloom flat.
     float rr = length(pos.xy) + 1e-3;
+    // center-out = a ROUND radial fountain with a WANDERING FRINGE.
+    //   inside roundR: a strong pure-radial push dominates → a clean round body
+    //     that emerges from the centre (radial velocity is invariant under the
+    //     mirror fold, so no convergent/divergent seams).
+    //   past roundR: the push fades to a gentle creep AND the curl noise is
+    //     restored/boosted, so the outer particles BREAK FREE and wander off
+    //     organically toward the canvas edges — the body stays round, the rim
+    //     dissolves into drifting particles tracing their own paths.
+    float roundR = 1.7;
+    float core = 1.0 - smoothstep(roundR * 0.7, roundR, rr);  // 1 in body → 0 past it
+    float coCurl = mix(0.45, 1.3, smoothstep(roundR * 0.7, roundR * 1.7, rr));
+    field *= mix(uCurlStrength, uCurlStrength * coCurl, uCenterOut);
     vec2 outDir = pos.xy / rr;
-    float push = 0.55 * exp(-rr * 1.1) + 0.30;
-    vec3 outward = vec3(outDir * push, -pos.z * 0.4);
+    float push = (0.55 * exp(-rr * 1.1) + 0.30) * core + 0.10 * (1.0 - core);
+    vec3 outward = vec3(outDir * push, -pos.z * mix(0.4, 0.12, 1.0 - core));
     vec3 inward = -pos * 0.18;
     field += mix(inward, outward, uCenterOut);
 
@@ -245,12 +244,14 @@ const positionFrag = /* glsl */ `
     vec3 vel = texture2D(textureVelocity, uv).xyz;
 
     pos += vel * uDt * uSpeed;
-    // each particle has its own lifespan (stable per texel) → staggered death
-    float lifeDecay = uLifeDecay * (0.45 + hash12(uv * 7.13) * 1.6);
+    // each particle has its own lifespan (stable per texel) → staggered death.
+    // center-out lives longer so the freed fringe particles survive long enough to
+    // wander out toward the edges instead of dying close to the round body.
+    float lifeDecay = uLifeDecay * (0.45 + hash12(uv * 7.13) * 1.6) * mix(1.0, 0.6, uCenterOut);
     life -= uDt * lifeDecay;
 
-    // center-out recycles at a tighter rim so the fountain stays on-screen.
-    float rim = mix(3.4, 1.9, uCenterOut);
+    // center-out lets particles roam out to the wide edges before recycling.
+    float rim = mix(3.4, 3.2, uCenterOut);
     if (life <= 0.0 || length(pos) > rim) {
       float t = uTime * 0.37;
       vec3 r = vec3(
@@ -400,7 +401,6 @@ const displayFrag = /* glsl */ `
   uniform float uSeamSoft;    // 0 = hard mirror seams, 1 = strongly feathered seams
   uniform float uRotational;  // 0 = mirror fold (symMorph), 1 = rotational (rotMorph, no seam)
   uniform float uDivide;      // 1 = divide-and-move fold (auto · divide), uses uA slots
-  uniform float uCenterOut;   // 1 = center-out mode: stretch the fold to fill a wide canvas
   // Two full parameter sets so we can crossfade between any two presets.
   // Layout: 0 kind, 1 segments, 2 rings, 3 points, 4 bubbleRate, 5 driftAmt,
   // 6 driftSpeed, 7 rotSpeed, 8 segPerPoint, 9 blendSharp, 10 orbitRadius,
@@ -977,15 +977,10 @@ const displayFrag = /* glsl */ `
         // base radial seg can swap invisibly at seam 1, and the bloom structure
         // at seam 0 — both directions clean, always consolidates to radial.
         float seam = smoothstep(0.0, 1.0, uA[2]);
-        // center-out fills a landscape canvas: ease the fold's aspect toward 1 so
-        // the (otherwise circular) radial pattern stretches out to the screen edges
-        // instead of leaving black side bars. Original evolving symmetry (uCenterOut
-        // = 0) keeps the true aspect → stays perfectly circular.
-        float faC = mix(aspect, 1.0, uCenterOut);
-        vec2 baseR = radial(vUv, max(uA[9], 2.0), uA[11], faC);
+        vec2 baseR = radial(vUv, max(uA[9], 2.0), uA[11], aspect);
         int bt = int(uA[8] + 0.5);
         vec2 folded;
-        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], faC);
+        if (bt == 2)      folded = radial(vUv, max(uA[3], 2.0), uA[11], aspect);
         // bt 1 = N-fold MORPH (the auto·symmetry triangle): N=uA[3] mirror-
         //   symmetric lobes (each mirrored down its own centerline — GUARANTEED
         //   symmetric, no lopsided blobs), a radial focal point at focusR=uA[10]
@@ -993,11 +988,11 @@ const displayFrag = /* glsl */ `
         // bt 1 = TRIANGLE KALEIDOSCOPE: equilateral-triangle mirror fold whose
         //   seams meet at the three VERTICES (not the center). scale=uA[10],
         //   rot=uA[11] (worldRot+orbit).
-        else if (bt == 1) folded = triKaleido(vUv, faC, uA[10], uA[11]);
+        else if (bt == 1) folded = triKaleido(vUv, aspect, uA[10], uA[11]);
         // GRID bloom: pass worldRot=0 so the fold seams stay axis-aligned
         // (horizontal/vertical), never diagonal. The whole-field swing still
         // lives in the radial base + spin; the grid itself stays square.
-        else              folded = divideMove(vUv, faC, uA[10], uA[12], uA[5], uA[6], 0.0, uA[4], uA[7], uA[1]);
+        else              folded = divideMove(vUv, aspect, uA[10], uA[12], uA[5], uA[6], 0.0, uA[4], uA[7], uA[1]);
         uv = mix(baseR, folded, seam);
       } else if (uDivide > 1.5) {
         uv = symCells(vUv, aspect, uA[2], uA[5], uA[6], uA[10], uA[12], uA[11], uA[4], uA[7], uA[1]);
@@ -1406,7 +1401,6 @@ export class Visualizer {
         uSeamSoft: { value: 0.6 },
         uRotational: { value: 0 },
         uDivide: { value: 0 },
-        uCenterOut: { value: 0 },
         uA: { value: this.uAVals },
         uB: { value: this.uBVals },
       },
@@ -2064,7 +2058,6 @@ export class Visualizer {
   private setCenterOut(on: boolean) {
     this.velocityVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
     this.positionVar.material.uniforms.uCenterOut.value = on ? 1 : 0;
-    this.displayMat.uniforms.uCenterOut.value = on ? 1 : 0; // fill-the-canvas fold stretch
   }
 
   private surfCenterPose(numPoints = 3): SurfPose {
